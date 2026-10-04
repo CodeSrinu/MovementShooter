@@ -8,6 +8,12 @@
     <SelfContained>false</SelfContained>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <Product>KINETIC</Product>
+    <AssemblyTitle>KINETIC</AssemblyTitle>
+    <Description>A fast-paced, skill-based 3D movement shooter built on C# and MonoGame.</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="MonoGame.Framework.DesktopGL" Version="3.8.5.1" />
   </ItemGroup>

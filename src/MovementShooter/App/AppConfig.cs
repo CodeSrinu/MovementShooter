@@ -16,7 +16,7 @@ public sealed class AppConfig
     public bool VerticalSync { get; set; } = true;
     public bool FixedTimeStep { get; set; } = true;
     public double TargetFrameRate { get; set; } = 60.0;
-    public string WindowTitle { get; set; } = "Movement Shooter";
+    public string WindowTitle { get; set; } = GameName.Value;
 
     public Color ClearColor { get; set; } = new Color(24, 28, 38);
 
@@ -94,7 +94,7 @@ public sealed class AppConfig
             : Path.Combine(AppContext.BaseDirectory, SelfTestOutputDirectory);
 
     public static string Usage =>
-        "MovementShooter [options]\n" +
+        $"{GameName.Value} [options]\n" +
         "  --selftest      Render offscreen, write a PNG screenshot, report pixel stats and exit\n" +
         "  --frames N      Rendered-frame budget for the run (default: unlimited, 6 for --selftest)\n" +
         "  --out DIR       Directory for screenshots (default artifacts)\n" +

@@ -14,7 +14,7 @@ public enum LogLevel
 }
 
 /// <summary>
-/// Tiny dependency-free logger. Writes to the console and to <c>logs/movement-shooter.log</c> so the
+/// Tiny dependency-free logger. Writes to the console and to <c>logs/kinetic.log</c> so the
 /// output is still inspectable when the game is launched as a windowed <c>WinExe</c>.
 /// </summary>
 public static class Log
@@ -72,7 +72,7 @@ public static class Log
     {
         string directory = Path.Combine(AppContext.BaseDirectory, "logs");
         Directory.CreateDirectory(directory);
-        string path = Path.Combine(directory, "movement-shooter.log");
+        string path = Path.Combine(directory, "kinetic.log");
         return new StreamWriter(path, append: true, encoding: new UTF8Encoding(false)) { AutoFlush = true };
     }
 }

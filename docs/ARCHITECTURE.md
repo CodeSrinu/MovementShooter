@@ -24,10 +24,18 @@ Program.cs                       process entry, argument errors -> exit codes
 
 `GameApp` is the only place allowed to know about all of the others. Systems never construct each other.
 
+## Naming
+
+The product is **KINETIC** (`App/GameName.cs` is the single source of truth for the window title, CLI text
+and log file name). The assembly, namespaces, folders, solution, executable and GitHub repository keep
+the name `MovementShooter`: those are structural, not cosmetic, and renaming them would touch every
+import and build path for no gameplay benefit. Build metadata (`Product`, `AssemblyTitle`, `Description`)
+carries the KINETIC name.
+
 ## Layers and their contracts
 
 ### Core (`MovementShooter.Core`)
-Engine-agnostic helpers. `Log` writes to console + `logs/movement-shooter.log`. `MathHelpers` holds the
+Engine-agnostic helpers. `Log` writes to console + `logs/kinetic.log`. `MathHelpers` holds the
 clamp/lerp/smoothstep/deadzone helpers that movement code will reuse. `PngWriter` is a BCL-only PNG
 encoder used by the self-test so screenshots need no image library.
 

@@ -1,10 +1,15 @@
-# Movement Shooter
+# KINETIC
 
 A fast-paced, skill-based 3D movement shooter built on **C# + MonoGame** (DesktopGL). No Unity, Unreal or
 Godot. The design goal is *movement + physics + weapon technique + outplaying* — not generic FPS aim.
 
 **Status: milestone 1 complete.** Empty folder → clean MonoGame project → 3D rendering → camera → test
 world → verified build and run. No gameplay yet, by design.
+
+> **Naming:** the game is **KINETIC**. The assembly, namespaces, folders, solution and executable keep the
+> name `MovementShooter` (and so does the GitHub repository) — renaming those would churn every path and
+> import for no gameplay benefit. Everything a player or user actually *sees* — window title, CLI, log
+> file, build metadata, docs — is KINETIC, driven by the single `App/GameName.cs` constant.
 
 ---
 
@@ -49,7 +54,7 @@ Self-test PASSED: 3D scene rendered as expected.
 
 Exit codes: `0` success, `1` self-test failed, `2` bad arguments, `3` unhandled error.
 
-Logs go to the console *and* to `logs/movement-shooter.log` next to the executable.
+Logs go to the console *and* to `logs/kinetic.log` next to the executable.
 
 ## Controls (bootstrap spectator camera)
 
@@ -96,12 +101,14 @@ loaded. When art is needed, either keep generating meshes procedurally or add MG
 ## Layout
 
 ```
-MovementShooter.sln
+MovementShooter.sln                (assembly/namespace names stay; the game is KINETIC)
 .editorconfig                   Formatting rules for C#
 Directory.Build.props          Shared compiler settings
 src/MovementShooter/
   Program.cs                   Entry point, exit codes
-  App/       GameApp.cs        Game bootstrap + main loop; AppConfig.cs = all tunables/CLI
+  App/       GameApp.cs        Game bootstrap + main loop
+              AppConfig.cs     Window, camera and self-test settings, parsed from the CLI
+              GameName.cs      The KINETIC branding constant
   Core/                        Log, MathHelpers, PngWriter, ConsoleHost (no engine deps)
   Camera/                      CameraRig + FlyCamera/OrbitCamera + input/controller
   Graphics/                    MeshBuilder, MeshData, GpuMesh, SurfaceMaterial
