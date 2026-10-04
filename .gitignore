@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+artifacts/
+
+# Runtime output written by the game itself (logs/, self-test screenshots)
+[Ll]og/
+[Ll]ogs/
+*.log
+
+# ---------------------------------------------------------------------------
+# MonoGame content pipeline output (.xnb files are compiled assets)
+# ---------------------------------------------------------------------------
+*.xnb
+Content/[Bb]in/
+Content/[Oo]bj/
+
+# ---------------------------------------------------------------------------
+# NuGet
+# ---------------------------------------------------------------------------
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+*.nuget.props
+*.nuget.dgspec.json
+*.nuget.g.props
+*.nuget.g.targets
+
+# ---------------------------------------------------------------------------
+# IDE files (shared settings only; user-specific state is ignored)
+# ---------------------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+_ReSharper*/
+*.DotSettings.user
+
+# ---------------------------------------------------------------------------
+# Test / coverage / profiling output
+# ---------------------------------------------------------------------------
+[Tt]est[Rr]esult*/
+[Bb]enchmark[Rr]esult*/
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# ---------------------------------------------------------------------------
+# Debugging symbols and crash dumps
+# ---------------------------------------------------------------------------
+*.pdb
+*.mdb
+*.dmp
+*.mdmp
+
+# ---------------------------------------------------------------------------
+# OS noise
+# ---------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# Secrets and local machine settings
+# ---------------------------------------------------------------------------
+*.env
+.env
+.env.*
+!.env.example
+*.pfx
+*.snk
+*.keystore
+secrets.json
