@@ -6,11 +6,11 @@ using Microsoft.Xna.Framework;
 namespace MovementShooter.App;
 
 /// <summary>
-/// Every tunable value the bootstrap needs lives here so nothing is hard-coded inside systems.
-/// Movement/weapon tunables arrive with the gameplay milestones; they get their own config objects.
-/// </summary>
-public sealed class AppConfig
-{
+    /// Every tunable value the bootstrap needs lives here so nothing is hard-coded inside systems. Player
+    /// feel lives in <see cref="Player.PlayerTuning"/>, exposed here as <see cref="Player"/>.
+    /// </summary>
+    public sealed class AppConfig
+    {
     public int WindowWidth { get; set; } = 1600;
     public int WindowHeight { get; set; } = 900;
     public bool VerticalSync { get; set; } = true;
@@ -20,16 +20,23 @@ public sealed class AppConfig
 
     public Color ClearColor { get; set; } = new Color(24, 28, 38);
 
-    public float FieldOfViewDegrees { get; set; } = 75f;
-    public float NearPlane { get; set; } = 0.1f;
-    public float FarPlane { get; set; } = 3000f;
-    public float MouseSensitivity { get; set; } = 0.0022f;
+    /// <summary>All player tuning: capsule size, speed, acceleration, friction, gravity, jump, camera.</summary>
+    public Player.PlayerTuning Player { get; } = new();
 
-    /// <summary>Base speed of the bootstrap spectator camera; the player controller has its own values.</summary>
-    public float FlyCameraSpeed { get; set; } = 24f;
+    /// <summary>All rocket launcher tuning: projectile speed, lifetime, blast radius, damage and force.</summary>
+    public Weapons.RocketLauncherTuning RocketLauncher { get; } = new();
+
+    /// <summary>How the first-person launcher is held and how it recoils. Presentation only.</summary>
+    public Weapons.ViewModelTuning WeaponViewModel { get; } = new();
+
+    /// <summary>Shows the development-only player readout in the corner of the window.</summary>
+    public bool ShowPlayerDebug { get; set; } = true;
 
     /// <summary>Headless-ish render validation: renders N frames into an offscreen target and exits.</summary>
     public bool RunSelfTest { get; set; }
+
+    /// <summary>Runs the player and physics checks with no window at all, then exits.</summary>
+    public bool RunPhysicsTest { get; set; }
 
     public int SelfTestWidth { get; set; } = 1280;
     public int SelfTestHeight { get; set; } = 720;
@@ -57,6 +64,12 @@ public sealed class AppConfig
             {
                 case "--selftest":
                     config.RunSelfTest = true;
+                    break;
+                case "--physics-test":
+                    config.RunPhysicsTest = true;
+                    break;
+                case "--nodebug":
+                    config.ShowPlayerDebug = false;
                     break;
                 case "--width":
                     config.WindowWidth = ReadInt(args, ref i);
@@ -96,10 +109,12 @@ public sealed class AppConfig
     public static string Usage =>
         $"{GameName.Value} [options]\n" +
         "  --selftest      Render offscreen, write a PNG screenshot, report pixel stats and exit\n" +
+        "  --physics-test  Run the headless player and physics checks and exit\n" +
         "  --frames N      Rendered-frame budget for the run (default: unlimited, 6 for --selftest)\n" +
         "  --out DIR       Directory for screenshots (default artifacts)\n" +
         "  --width N       Window width (default 1600)\n" +
         "  --height N      Window height (default 900)\n" +
+        "  --nodebug       Hide the development player readout\n" +
         "  --novsync       Disable vertical sync\n" +
         "  --help          Show this text";
 

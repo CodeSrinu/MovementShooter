@@ -18,6 +18,21 @@ Content/[Bb]in/
 Content/[Oo]bj/
 
 # ---------------------------------------------------------------------------
+# Blender
+# ---------------------------------------------------------------------------
+# *.blend source scenes and *.glb exports are tracked deliberately - they are
+# authored assets, not build output. Only Blender's own generated siblings are
+# ignored below.
+#
+# "Save Versions" backups: foo.blend1 .. foo.blend9. Matching a trailing digit
+# instead of listing each suffix keeps this correct regardless of how many save
+# versions are configured, and cannot swallow a real ".blend".
+*.blend[0-9]
+
+# Written when Blender is configured to save on quit.
+quit.blend
+
+# ---------------------------------------------------------------------------
 # NuGet
 # ---------------------------------------------------------------------------
 *.nupkg
@@ -41,7 +56,16 @@ packages/
 *.sln.docstates
 *.DotSettings.user
 _ReSharper*/
-*.DotSettings.user
+
+# Editor and merge leftovers
+*~
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+.*.sw[a-z]
+.history/
 
 # ---------------------------------------------------------------------------
 # Test / coverage / profiling output
@@ -67,8 +91,12 @@ coverage*.info
 # ---------------------------------------------------------------------------
 Thumbs.db
 ehthumbs.db
+ehthumbs_v2.db
 Desktop.ini
 .DS_Store
+$RECYCLE.BIN/
+*.lnk
+nohup.out
 
 # ---------------------------------------------------------------------------
 # Secrets and local machine settings

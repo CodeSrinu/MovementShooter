@@ -97,7 +97,7 @@ public sealed class MeshBuilder
         AddQuad(backLeft, topLeft, topRight, backRight, color);     // slope   (+Y/-Z)
         AddQuad(frontLeft, frontRight, topRight, topLeft, color);    // back    (+Z)
         AddTriangle(backRight, topRight, frontRight, color);         // +X side
-        AddTriangle(backLeft, topLeft, frontLeft, color);            // -X side
+        AddTriangle(backLeft, frontLeft, topLeft, color);            // -X side
         return this;
     }
 
@@ -121,7 +121,7 @@ public sealed class MeshBuilder
 
             AddQuad(b0, t0, t1, b1, color);    // side
             AddTriangle(top, t1, t0, color);    // top cap (+Y)
-            AddTriangle(bottom, b1, b0, color); // bottom cap (-Y)
+            AddTriangle(bottom, b0, b1, color); // bottom cap (-Y)
         }
 
         return this;

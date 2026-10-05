@@ -44,10 +44,6 @@ public sealed class SurfaceMaterial : IDisposable
     public static SurfaceMaterial CreateLit(GraphicsDevice device, Color diffuse) =>
         new(device, diffuse, lighting: true);
 
-    /// <summary>Flat colour material for markers, tracers and effects.</summary>
-    public static SurfaceMaterial CreateUnlit(GraphicsDevice device, Color diffuse) =>
-        new(device, diffuse, lighting: false);
-
     public void Apply(Matrix world, Matrix view, Matrix projection)
     {
         _effect.World = world;
