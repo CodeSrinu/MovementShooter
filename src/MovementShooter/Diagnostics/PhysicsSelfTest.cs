@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using MovementShooter.Character;
 using MovementShooter.Combat;
 using MovementShooter.Core;
 using MovementShooter.Graphics;
@@ -116,7 +118,1489 @@ public static IReadOnlyList<CheckResult> Run()
         results.Add(WeaponRecoilReturnsToRestAndIsFrameRateIndependent());
         results.Add(NoArenaSurfaceAllowsUnintendedClimbing());
 
+        // Character integration.
+        results.Add(CharacterAssetHasTheExpectedContents());
+        results.Add(CharacterSkinningAtRestReproducesTheBindPose());
+        results.Add(CharacterBonesOccupyTheSpaceTheMeshOccupies());
+        results.Add(CharacterSkeletonIsSingleRootedAndFullyWeighted());
+        results.Add(CharacterClipsAreWellFormed());
+        results.Add(CharacterPicksTheClipTheMovementImplies());
+        results.Add(CharacterHeightMatchesThePlayerCapsule());
+        results.Add(CharacterFiresAndReportsWithoutTouchingTheSimulation());
+        results.Add(CharacterSocketsAreAttachmentPointsAndNotBones());
+        results.Add(CharacterSocketsFollowTheAnimatedSkeleton());
+        results.Add(CharacterSocketChainResolvesThroughItsParent());
+        results.Add(WeaponAssetIsARigidMeshWithAnAuthoredMuzzle());
+        results.Add(WeaponSocketTracksHandR());
+        results.Add(WeaponSupportSocketTracksHandL());
+        results.Add(WeaponMuzzleRidesTheNestedSocketChain());
+        results.Add(WeaponMuzzleMovesWithTheAnimation());
+        results.Add(RocketSpawnsFromTheAuthoredMuzzleSocket());
+        results.Add(WeaponBarrelPointsWhereTheMuzzleSocketDoes());
+        results.Add(WeaponIsProportionedToTheCharacter());
+
         return results;
+    }
+
+    // ---------------------------------------------------------------------
+    // Character integration.
+    //
+    // These run headless on purpose: the skinning, the skeleton and the clip
+    // selection all hold no GraphicsDevice, so the parts of the character most
+    // likely to be wrong can be checked without opening a window. Only the
+    // renderer needs a device, and it is exercised by the self-test render and
+    // by playing the game.
+    // ---------------------------------------------------------------------
+
+    private static CharacterAsset LoadCharacterAsset()
+    {
+        try
+        {
+            return CharacterAsset.Load();
+        }
+        catch (Exception ex) when (ex is System.IO.InvalidDataException or FileNotFoundException)
+        {
+            throw new InvalidOperationException(
+                "The embedded character asset could not be read. Regenerate it with tools\\KineticAssetTool. Detail: " +
+                ex.Message, ex);
+        }
+    }
+
+    /// <summary>
+    /// The asset has to actually contain the rig and every clip, or the character
+    /// silently degrades to a static T-pose with no error anywhere.
+    /// </summary>
+    private static CheckResult CharacterAssetHasTheExpectedContents()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+
+        List<string> failures = new();
+
+        if (asset.BoneCount != 17)
+        {
+            failures.Add("bones " + asset.BoneCount + " != 17");
+        }
+
+        if (asset.Materials.Length != 4)
+        {
+            failures.Add("materials " + asset.Materials.Length + " != 4");
+        }
+
+        if (asset.Submeshes.Length != 4)
+        {
+            failures.Add("submeshes " + asset.Submeshes.Length + " != 4");
+        }
+
+        string[] required =
+        {
+            "KINETIC_Idle", "KINETIC_Run", "KINETIC_Jump", "KINETIC_Fall",
+            "KINETIC_Land", "KINETIC_Slide", "KINETIC_Dash", "KINETIC_Fire",
+        };
+
+        foreach (string name in required)
+        {
+            if (asset.IndexOfClip(name) < 0)
+            {
+                failures.Add("missing clip " + name);
+            }
+        }
+
+        if (asset.TriangleCount <= 0)
+        {
+            failures.Add("no triangles");
+        }
+
+        // Submesh ranges must tile the index buffer exactly, or part of the
+        // character is never drawn or drawn twice.
+        int covered = 0;
+        foreach (CharacterSubmesh submesh in asset.Submeshes)
+        {
+            if (submesh.IndexCount % 3 != 0)
+            {
+                failures.Add("submesh " + submesh.MaterialIndex + " has " + submesh.IndexCount + " indices");
+            }
+
+            if (submesh.FirstIndex != covered)
+            {
+                failures.Add("submesh " + submesh.MaterialIndex + " starts at " + submesh.FirstIndex +
+                             ", expected " + covered);
+            }
+
+            covered += submesh.IndexCount;
+        }
+
+        if (covered != asset.Indices.Length)
+        {
+            failures.Add("submeshes cover " + covered + " of " + asset.Indices.Length + " indices");
+        }
+
+        foreach (int index in asset.Indices)
+        {
+            if (index < 0 || index >= asset.VertexCount)
+            {
+                failures.Add("index " + index + " out of range");
+                break;
+            }
+        }
+
+        return new("character asset carries the rig, materials and all eight clips", failures.Count == 0,
+            failures.Count == 0
+                ? asset.VertexCount + " verts, " + asset.TriangleCount + " tris, " + asset.BoneCount +
+                  " bones, " + asset.Materials.Length + " materials, " + asset.Clips.Length + " clips"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The decisive skinning check. Every convention error in the loader - a
+    /// missing transpose, a wrong composition order, bind globals that were never
+    /// recovered - shows up here as a character that is displaced from its own
+    /// mesh. At rest the skinning matrix of every bone must be identity, so the
+    /// skinned result has to reproduce the bind positions exactly.
+    /// </summary>
+    private static CheckResult CharacterSkinningAtRestReproducesTheBindPose()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterSkeleton skeleton = new(asset);
+        CharacterSkin skin = new(asset);
+
+        skin.Skin(skeleton);
+
+        float worstPosition = 0f;
+        float worstNormal = 0f;
+        int worstIndex = 0;
+
+        CharacterVertex[] source = asset.Vertices;
+        for (int i = 0; i < source.Length; i++)
+        {
+            Vector3 position = skin.Vertices[i].Position;
+            Vector3 normal = skin.Vertices[i].Normal;
+
+            float positionError = Vector3.Distance(position, source[i].BindPosition);
+            float normalError = 1f - Vector3.Dot(normal, source[i].BindNormal);
+
+            if (positionError > worstPosition)
+            {
+                worstPosition = positionError;
+                worstIndex = i;
+            }
+
+            worstNormal = MathF.Max(worstNormal, normalError);
+        }
+
+        // 2 mm. Float accumulation over four influences makes an exact zero
+        // comparison fail for reasons that are not bugs.
+        const float tolerance = 0.002f;
+        bool passed = worstPosition <= tolerance && worstNormal <= 0.01f;
+
+        return new("skinning at rest reproduces the bind pose exactly", passed,
+            "worst position error " + Format(worstPosition) + " m at vertex " + worstIndex +
+            ", worst normal deviation " + Format(worstNormal) + " over " + source.Length + " vertices");
+    }
+
+    /// <summary>
+    /// The companion to the bind-pose check above, and the one that actually pins the
+    /// bind matrices down. At rest, <c>IBM * inverse(IBM)</c> is identity for any IBM at
+    /// all, so reproducing the bind pose proves nothing about whether the matrix was
+    /// read in the right convention - a transposed inverse bind matrix renders a perfect
+    /// character at rest and collapses it the moment a clip moves a bone.
+    ///
+    /// What cannot be faked is where the bones end up. The rig is 1.795 m tall and rooted
+    /// at the feet, so the Hips bone sits near 0.93 m and the Head bone near 1.58 m: the
+    /// inverse bind matrices must spread the skeleton across that span. If they do not,
+    /// they are wrong even though the bind pose looks right.
+    /// </summary>
+    private static CheckResult CharacterBonesOccupyTheSpaceTheMeshOccupies()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterSkeleton skeleton = new(asset);
+
+        List<string> failures = new();
+
+        // Spans taken from the authored rig: bone head positions at bind time.
+        (string Bone, float ExpectedY)[] expected =
+        {
+            ("Hips", 0.930f),
+            ("Chest", 1.200f),
+            ("Neck", 1.440f),
+            ("Head", 1.575f),
+        };
+
+        float lowest = float.MaxValue;
+        float highest = float.MinValue;
+
+        foreach ((string bone, float expectedY) in expected)
+        {
+            int index = asset.IndexOfBone(bone);
+            if (index < 0)
+            {
+                failures.Add("no bone named " + bone);
+                continue;
+            }
+
+            Matrix global = skeleton.BindGlobal(index);
+            float y = global.M42;
+
+            lowest = MathF.Min(lowest, y);
+            highest = MathF.Max(highest, y);
+
+            // 5 cm. Bone heads are known to a millimetre, so anything looser would let
+            // the failure this check exists for slip through again.
+            if (MathF.Abs(y - expectedY) > 0.05f)
+            {
+                failures.Add(bone + " bind position is " + Format(y) + " m, expected " + Format(expectedY) + " m");
+            }
+        }
+
+        // A stack of bones at the origin would satisfy any single entry above only if
+        // every expected value were 0, so also require real vertical spread.
+        if (lowest < float.MaxValue && highest - lowest < 0.5f)
+        {
+            failures.Add("the skeleton only spans " + Format(highest - lowest) +
+                " m vertically; bones have collapsed toward a single point");
+        }
+
+        // And the failure's actual symptom: posing a clip must not shrink the mesh.
+        // Idle's first frame is a near-rest pose, so it has to keep the character's
+        // height. A collapsed skeleton shrinks this to a fraction of a metre.
+        CharacterSkin skin = new(asset);
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+        int idle = animator.ClipIndexFor(CharacterAnim.Idle);
+        if (idle >= 0)
+        {
+            animator.PoseClip(idle, 0f, skeleton);
+            skin.Skin(skeleton);
+
+            float minY = float.MaxValue;
+            float maxY = float.MinValue;
+            foreach (VertexPositionColorNormal vertex in skin.Vertices)
+            {
+                minY = MathF.Min(minY, vertex.Position.Y);
+                maxY = MathF.Max(maxY, vertex.Position.Y);
+            }
+
+            float posed = maxY - minY;
+            if (posed < 1.5f)
+            {
+                failures.Add("posed mesh spans only " + Format(posed) + " m; the bind matrices do not place bones in the mesh");
+            }
+        }
+        else
+        {
+            failures.Add("no Idle clip to pose");
+        }
+
+        return new("character bones occupy the space the mesh occupies", failures.Count == 0,
+            failures.Count == 0
+                ? "Hips through Head sit at 0.93 m .. 1.58 m and a posed frame keeps full height"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// A skeleton with a second root, a cycle, or a vertex with no influence
+    /// composes into garbage or collapses geometry to the origin, and neither
+    /// failure produces an error at load time.
+    /// </summary>
+    private static CheckResult CharacterSkeletonIsSingleRootedAndFullyWeighted()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        List<string> failures = new();
+
+        int roots = 0;
+        for (int i = 0; i < asset.BoneCount; i++)
+        {
+            int parent = asset.Bones[i].ParentIndex;
+            if (parent < 0)
+            {
+                roots++;
+                continue;
+            }
+
+            if (parent >= asset.BoneCount)
+            {
+                failures.Add("bone " + asset.Bones[i].Name + " has parent index " + parent);
+                continue;
+            }
+
+            // Walk up with a bounded depth: a cycle shows up as the bound being hit.
+            int depth = 0;
+            int node = parent;
+            while (node >= 0 && depth <= asset.BoneCount)
+            {
+                node = asset.Bones[node].ParentIndex;
+                depth++;
+            }
+
+            if (depth > asset.BoneCount)
+            {
+                failures.Add("bone " + asset.Bones[i].Name + " is in a parent cycle");
+                break;
+            }
+        }
+
+        if (roots != 1)
+        {
+            failures.Add(roots + " roots, expected exactly 1");
+        }
+
+        const float weightTolerance = 0.02f;
+        foreach (CharacterVertex vertex in asset.Vertices)
+        {
+            float total = vertex.Weight0 + vertex.Weight1 + vertex.Weight2 + vertex.Weight3;
+            if (MathF.Abs(total - 1f) > weightTolerance)
+            {
+                failures.Add("a vertex's weights sum to " + Format(total));
+                break;
+            }
+
+            if (vertex.Joint0 < 0 || vertex.Joint0 >= asset.BoneCount ||
+                vertex.Joint1 < 0 || vertex.Joint1 >= asset.BoneCount ||
+                vertex.Joint2 < 0 || vertex.Joint2 >= asset.BoneCount ||
+                vertex.Joint3 < 0 || vertex.Joint3 >= asset.BoneCount)
+            {
+                failures.Add("a vertex references a bone outside the skeleton");
+                break;
+            }
+        }
+
+        return new("character skeleton is single-rooted and every vertex is weighted", failures.Count == 0,
+            failures.Count == 0
+                ? asset.BoneCount + " bones, 1 root, all " + asset.VertexCount + " vertices weighted"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// A clip with non-ascending times, no keys, or a zero duration would make
+    /// the animator sample out of range or divide by zero on the cadence scaling.
+    /// </summary>
+    private static CheckResult CharacterClipsAreWellFormed()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        List<string> failures = new();
+
+        foreach (CharacterClip clip in asset.Clips)
+        {
+            if (clip.Duration <= 0f)
+            {
+                failures.Add(clip.Name + " duration " + Format(clip.Duration));
+            }
+
+            if (clip.FrameCount < 2)
+            {
+                failures.Add(clip.Name + " has " + clip.FrameCount + " keys");
+                continue;
+            }
+
+            if (clip.Times[0] > 1e-4f)
+            {
+                failures.Add(clip.Name + " starts at " + Format(clip.Times[0]) + " s");
+            }
+
+            for (int i = 1; i < clip.FrameCount; i++)
+            {
+                if (clip.Times[i] <= clip.Times[i - 1])
+                {
+                    failures.Add(clip.Name + " times are not ascending at key " + i);
+                    break;
+                }
+            }
+
+            if (MathF.Abs(clip.Times[clip.FrameCount - 1] - clip.Duration) > 0.01f)
+            {
+                failures.Add(clip.Name + " last key " + Format(clip.Times[clip.FrameCount - 1]) +
+                             " != duration " + Format(clip.Duration));
+            }
+        }
+
+        return new("every animation clip is well formed", failures.Count == 0,
+            failures.Count == 0
+                ? asset.Clips.Length + " clips, " + string.Join(", ", asset.Clips.Length == 0
+                    ? Array.Empty<string>()
+                    : new[] { asset.Clips[0].Name + " " + Format(asset.Clips[0].Duration) + "s" })
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// Clip selection is the whole contract between movement and the character, and
+    /// it is pure logic - so it can be pinned exactly. A wrong mapping is invisible
+    /// in a screenshot of a standing player.
+    /// </summary>
+    private static CheckResult CharacterPicksTheClipTheMovementImplies()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterTuning tuning = new();
+        List<string> failures = new();
+
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+
+        void Expect(CharacterAnim expected, in CharacterAnimationInput input, string label)
+        {
+            // Two ticks: the first establishes the previous frame's facts, the
+            // second presents the transition.
+            animator.Update(1f / 60f, input, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+            animator.Update(1f / 60f, input, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+
+            if (animator.Current != expected)
+            {
+                failures.Add(label + " gave " + animator.Current + ", expected " + expected);
+            }
+        }
+
+        CharacterAnimationInput groundedStill = new(true, 0f, 0f, false, false, false);
+        CharacterAnimationInput groundedRunning = new(true, 0f, 9f, false, false, false);
+        CharacterAnimationInput rising = new(false, 6f, 4f, false, false, false);
+        CharacterAnimationInput falling = new(false, -6f, 4f, false, false, false);
+        CharacterAnimationInput firing = new(true, 0f, 0f, false, false, true);
+
+        Expect(CharacterAnim.Idle, groundedStill, "stationary");
+        Expect(CharacterAnim.Run, groundedRunning, "grounded movement");
+
+        // Airborne rising, then falling: the same animator, so state carries over.
+        animator.Update(1f / 60f, rising, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, rising, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        if (animator.Current != CharacterAnim.Jump)
+        {
+            failures.Add("rising gave " + animator.Current + ", expected Jump");
+        }
+
+        animator.Update(1f / 60f, falling, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, falling, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        if (animator.Current != CharacterAnim.Fall)
+        {
+            failures.Add("descending gave " + animator.Current + ", expected Fall");
+        }
+
+        Expect(CharacterAnim.Fire, firing, "a successful shot");
+
+        // Sliding and dashing are edges, so they need the state to change.
+        animator.Update(1f / 60f, groundedStill, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, groundedStill, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, new CharacterAnimationInput(true, 0f, 8f, true, false, false),
+            tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, new CharacterAnimationInput(true, 0f, 8f, true, false, false),
+            tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        if (animator.Current != CharacterAnim.Slide)
+        {
+            failures.Add("sliding gave " + animator.Current + ", expected Slide");
+        }
+
+        animator.Update(1f / 60f, groundedStill, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, groundedStill, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, new CharacterAnimationInput(true, 0f, 14f, false, true, false),
+            tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        animator.Update(1f / 60f, new CharacterAnimationInput(true, 0f, 14f, false, true, false),
+            tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+        if (animator.Current != CharacterAnim.Dash)
+        {
+            failures.Add("dashing gave " + animator.Current + ", expected Dash");
+        }
+
+        return new("character picks the clip the movement state implies", failures.Count == 0,
+            failures.Count == 0
+                ? "idle, run, jump, fall, land, slide, dash and fire all reachable"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The rig was authored to the capsule height. A drift here is invisible on the
+    /// debug overlay and very visible in game - the character either sinks into the
+    /// floor or hovers above it.
+    /// </summary>
+    private static CheckResult CharacterHeightMatchesThePlayerCapsule()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterTuning tuning = new();
+
+        float capsule = new PlayerTuning().CapsuleHeight;
+        float drawn = asset.Height * tuning.Scale;
+        float error = MathF.Abs(drawn - capsule);
+
+        // 5 cm. The rig is authored to 1.795 m against a 1.800 m capsule; anything
+        // beyond a few centimetres means the scale or the mesh changed.
+        const float tolerance = 0.05f;
+        bool passed = error <= tolerance;
+
+        return new("character height matches the player capsule", passed,
+            "drawn " + Format(drawn) + " m against capsule " + Format(capsule) + " m, error " +
+            Format(error) + " m at scale " + Format(tuning.Scale));
+    }
+
+    /// <summary>
+    /// The character is presentation. Driving a full animation cycle must leave the
+    /// simulation bit-for-bit identical, or the visual has become authoritative over
+    /// movement by accident. Same contract as the movement-feedback check.
+    /// </summary>
+    private static CheckResult CharacterFiresAndReportsWithoutTouchingTheSimulation()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterTuning tuning = new();
+
+        using Fixture quiet = Fixture.Create(spawnY: 3f);
+        using Fixture busy = Fixture.Create(spawnY: 3f);
+
+        Run(quiet, 60);
+        Run(busy, 60);
+
+        // Now animate the character hard in one fixture while the other does nothing.
+        CharacterSkeleton skeleton = new(asset);
+        CharacterSkin skin = new(asset);
+        CharacterAnimator animator = new(asset, skeleton, new CharacterSkeleton(asset));
+
+        CharacterAnimationInput[] script =
+        {
+            new(true, 0f, 12f, false, false, false),
+            new(true, 0f, 12f, true, false, false),
+            new(false, 8f, 10f, false, false, false),
+            new(false, -8f, 10f, false, false, false),
+            new(true, 0f, 0f, false, false, true),
+            new(true, 0f, 0f, false, true, false),
+        };
+
+        for (int frame = 0; frame < 240; frame++)
+        {
+            CharacterAnimationInput input = script[frame % script.Length];
+            animator.Update(1f / 60f, input, tuning.RunSpeedForFullRate, tuning.BlendSeconds);
+            skin.Skin(skeleton);
+
+            // Both fixtures get byte-identical input, driven one frame at a time. The
+            // only difference between them is that one has a character animating, so
+            // any drift is the character's - giving them different inputs would just
+            // measure the walk.
+            Vector3 move = new(MathF.Sin(frame * 0.05f), 0f, MathF.Cos(frame * 0.05f));
+            Run(busy, 1, move);
+            Run(quiet, 1, move);
+        }
+
+        float drift = Vector3.Distance(quiet.Player.Position, busy.Player.Position);
+        bool passed = drift <= 1e-6f;
+
+        return new("character animation never touches the simulation", passed,
+            "position drift " + Format(drift) + " m after 240 animated frames against an identical " +
+            "un-animated control (" + Describe(quiet.Player.Position) + " vs " +
+            Describe(busy.Player.Position) + ")");
+    }
+
+    /// <summary>
+    /// The weapon sockets are Blender Empties parented to bones, not bones. Two things
+    /// have to hold for that distinction to survive conversion: a socket must never be
+    /// reachable as a bone, and it must resolve to a real attachment rather than to
+    /// nothing.
+    ///
+    /// A character exported without its sockets has none, and that is a valid state - so
+    /// this checks the invariants of whatever sockets exist rather than demanding a count.
+    /// </summary>
+    private static List<string> SocketNames(CharacterAsset asset)
+    {
+        List<string> names = new(asset.Sockets.Length);
+        foreach (CharacterSocket socket in asset.Sockets)
+        {
+            names.Add(socket.Name);
+        }
+
+        return names;
+    }
+
+    private static CheckResult CharacterSocketsAreAttachmentPointsAndNotBones()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        List<string> failures = new();
+        HashSet<string> socketNames = new();
+
+        foreach (CharacterSocket socket in asset.Sockets)
+        {
+            if (string.IsNullOrEmpty(socket.Name))
+            {
+                failures.Add("a socket has no name");
+                continue;
+            }
+
+            if (!socketNames.Add(socket.Name))
+            {
+                failures.Add("duplicate socket name " + socket.Name);
+            }
+
+            // The decisive one: a socket present in the bone list would be skinned as a
+            // joint, changing BoneCount and every index derived from it.
+            if (asset.IndexOfBone(socket.Name) >= 0)
+            {
+                failures.Add("socket '" + socket.Name + "' is also a bone; sockets must not be bones");
+            }
+
+            bool hasParent = socket.ParentBone >= 0 || socket.ParentSocket >= 0;
+            if (!hasParent)
+            {
+                failures.Add("socket '" + socket.Name + "' has no parent; it could never be placed on the character");
+                continue;
+            }
+
+            if (socket.ParentBone >= asset.BoneCount)
+            {
+                failures.Add("socket '" + socket.Name + "' names bone " + socket.ParentBone +
+                             " but the skeleton only has " + asset.BoneCount);
+            }
+
+            if (socket.ParentSocket >= asset.Sockets.Length)
+            {
+                failures.Add("socket '" + socket.Name + "' names socket " + socket.ParentSocket +
+                             " but only " + asset.Sockets.Length + " exist");
+            }
+
+            if (MathF.Abs(socket.Local.Determinant()) < 1e-9f)
+            {
+                failures.Add("socket '" + socket.Name + "' has a singular local transform");
+            }
+        }
+
+        return new("character sockets are attachment points, not bones", failures.Count == 0,
+            failures.Count == 0
+                ? asset.Sockets.Length + " sockets, none of them bones: " +
+                  (asset.Sockets.Length == 0
+                      ? "character exported without attachment points"
+                      : string.Join(", ", SocketNames(asset)))
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// A socket is only useful if it moves with the animation. This poses the run cycle
+    /// and requires the socket's world transform to travel with the arm it hangs off -
+    /// a socket frozen in bind space would put a weapon in the wrong place while still
+    /// looking plausible in a static preview.
+    /// </summary>
+    private static CheckResult CharacterSocketsFollowTheAnimatedSkeleton()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+
+        if (asset.Sockets.Length == 0)
+        {
+            return new("character sockets follow the animated skeleton", true,
+                "character exported without attachment points; nothing to follow");
+        }
+
+        CharacterSkeleton skeleton = new(asset);
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+        CharacterTuning tuning = new();
+        int run = animator.ClipIndexFor(CharacterAnim.Run);
+
+        List<string> failures = new();
+        List<string> summary = new();
+
+        for (int socket = 0; socket < asset.Sockets.Length; socket++)
+        {
+            Vector3[] positions = new Vector3[8];
+
+            for (int sample = 0; sample < positions.Length; sample++)
+            {
+                animator.PoseClip(run, sample * 0.04f, skeleton);
+                Vector3 world = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(socket));
+                positions[sample] = world;
+            }
+
+            float travel = 0f;
+            for (int i = 1; i < positions.Length; i++)
+            {
+                travel = MathF.Max(travel, Vector3.Distance(positions[i], positions[0]));
+            }
+
+            summary.Add(asset.Sockets[socket].Name + " travels " + Format(travel) + " m over the run cycle");
+
+            // 1 cm. A socket parented to an animated arm must visibly move; anything less
+            // means it is resolving against a bind-pose transform rather than the pose.
+            if (travel < 0.01f)
+            {
+                failures.Add("socket '" + asset.Sockets[socket].Name + "' barely moves (" +
+                             Format(travel) + " m) while the skeleton is running; it is not following the pose");
+            }
+        }
+
+        return new("character sockets follow the animated skeleton", failures.Count == 0,
+            failures.Count == 0 ? string.Join("; ", summary) : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// A socket parented to another socket must resolve through it, not collapse onto the
+    /// bone behind it.
+    ///
+    /// MuzzlePoint hangs off WeaponSocket, which hangs off Hand.R. Resolving the muzzle
+    /// straight to Hand.R looks plausible - the muzzle still ends up near the hand - but
+    /// it silently discards WeaponSocket's own offset and puts the muzzle in the palm
+    /// instead of at the end of the weapon. The two are only distinguishable by distance,
+    /// so this checks that distance rather than just that both resolve.
+    /// </summary>
+    private static CheckResult CharacterSocketChainResolvesThroughItsParent()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+
+        int muzzle = asset.IndexOfSocket("MuzzlePoint");
+        int weapon = asset.IndexOfSocket("WeaponSocket");
+
+        if (muzzle < 0 || weapon < 0)
+        {
+            return new("socket parented to a socket resolves through it", true,
+                "character exported without a socket chain; nothing to chain");
+        }
+
+        List<string> failures = new();
+
+        if (asset.Sockets[muzzle].ParentSocket != weapon)
+        {
+            failures.Add("MuzzlePoint is recorded as attached to " +
+                         (asset.Sockets[muzzle].ParentSocket >= 0
+                             ? "socket " + asset.Sockets[asset.Sockets[muzzle].ParentSocket].Name
+                             : "bone " + (asset.Sockets[muzzle].ParentBone >= 0
+                                 ? asset.Bones[asset.Sockets[muzzle].ParentBone].Name
+                                 : "(nothing)")) +
+                         ", but it is authored under WeaponSocket");
+        }
+
+        // The authored muzzle offset along the weapon is 0.62 m. If the chain collapsed
+        // onto the hand, that offset would be gone and the two would coincide.
+        CharacterSkeleton skeleton = new(asset);
+        float separation = Vector3.Distance(
+            Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(muzzle)),
+            Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(weapon)));
+
+        if (separation < 0.1f)
+        {
+            failures.Add("MuzzlePoint sits only " + Format(separation) +
+                         " m from WeaponSocket; the socket chain collapsed onto the hand");
+        }
+
+        return new("socket parented to a socket resolves through it", failures.Count == 0,
+            failures.Count == 0
+                ? "MuzzlePoint resolves through WeaponSocket, " + Format(separation) + " m further out along the weapon"
+                : string.Join("; ", failures));
+    }
+
+    private static WeaponAsset LoadWeaponAsset()
+    {
+        try
+        {
+            return WeaponAsset.Load();
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException)
+        {
+            throw new InvalidOperationException(
+                "The embedded weapon asset could not be read. Regenerate it with " +
+                "tools\\KineticAssetTool --weapon. Detail: " + ex.Message, ex);
+        }
+    }
+
+    /// <summary>
+    /// The weapon is rigid geometry, not part of the character's skinned mesh, and it
+    /// carries an authored muzzle rather than one guessed from its bounds.
+    ///
+    /// Both properties are load-bearing. A weapon that arrived skinned would drag the
+    /// character's skeleton along with it; a muzzle taken from the mesh bounds would sit
+    /// at the outer edge of the flared muzzle bell, which is wider than the bore, so every
+    /// rocket would spawn visibly off to one side of the barrel.
+    /// </summary>
+    private static CheckResult WeaponAssetIsARigidMeshWithAnAuthoredMuzzle()
+    {
+        WeaponAsset weapon = LoadWeaponAsset();
+        CharacterAsset character = LoadCharacterAsset();
+        List<string> failures = new();
+
+        if (weapon.VertexCount <= 0 || weapon.TriangleCount <= 0)
+        {
+            failures.Add("weapon has no geometry");
+        }
+
+        if (weapon.Submeshes.Length != weapon.Materials.Length)
+        {
+            failures.Add("weapon has " + weapon.Submeshes.Length + " submeshes but " +
+                         weapon.Materials.Length + " materials");
+        }
+
+        // A rigid weapon has no bone list at all. This is the property that keeps it out
+        // of the character's skinning pipeline.
+        if (typeof(WeaponAsset).GetProperty("Bones") is not null ||
+            typeof(WeaponAsset).GetProperty("Clips") is not null)
+        {
+            failures.Add("weapon asset exposes a skeleton or clips; it must be rigid");
+        }
+
+        if (!weapon.HasAuthoredMuzzle)
+        {
+            failures.Add("weapon has no authored muzzle; the muzzle would be guessed from mesh bounds");
+        }
+
+        // The authored muzzle must sit inside the weapon's own footprint, and at its far
+        // end along +Z. A muzzle behind the grip or off the side is a wrong authoring, not
+        // a rounding error.
+        Vector3 muzzle = weapon.Muzzle;
+        float reach = weapon.ForwardExtent;
+        if (muzzle.Z <= 0f)
+        {
+            failures.Add("authored muzzle z is " + Format(muzzle.Z) +
+                         "; the weapon points along +Z so the muzzle must be forward of the grip");
+        }
+
+        if (muzzle.Z > reach + 1e-3f)
+        {
+            failures.Add("authored muzzle z " + Format(muzzle.Z) +
+                         " is beyond the mesh's forward extent " + Format(reach));
+        }
+
+        if (MathF.Abs(muzzle.X) > 0.05f)
+        {
+            failures.Add("authored muzzle x is " + Format(muzzle.X) +
+                         "; it should be on the weapon's centreline, not off to one side");
+        }
+
+        // 10 cm of slack: the muzzle is at the bell's inner face, the mesh extent at its
+        // outer rim, so they differ by the bell's flare.
+        if (reach - muzzle.Z > 0.1f)
+        {
+            failures.Add("the muzzle is " + Format(reach - muzzle.Z) +
+                         " m behind the mesh tip; it looks derived from bounds rather than authored");
+        }
+
+        // And it has to be a real weapon, not a debug box: more than a couple of dozen
+        // triangles and more than one material means it was designed.
+        if (weapon.TriangleCount < 40)
+        {
+            failures.Add("weapon has only " + weapon.TriangleCount + " triangles; that is a debug primitive, not an asset");
+        }
+
+        if (weapon.Materials.Length < 2)
+        {
+            failures.Add("weapon has a single material; it cannot read as a designed asset");
+        }
+
+        // Every material colour must be one the character already uses, so the two are
+        // lit as one object rather than as two unrelated props.
+        foreach (WeaponMaterial material in weapon.Materials)
+        {
+            bool known = false;
+            foreach (CharacterMaterial characterMaterial in character.Materials)
+            {
+                if (Vector3.Distance(material.Color, characterMaterial.Color) < 1e-3f)
+                {
+                    known = true;
+                    break;
+                }
+            }
+
+            if (!known)
+            {
+                failures.Add("weapon material '" + material.Name +
+                             "' uses a colour the character does not; the palettes must match");
+            }
+        }
+
+        return new("weapon is a rigid mesh with an authored muzzle", failures.Count == 0,
+            failures.Count == 0
+                ? weapon.VertexCount + " verts, " + weapon.TriangleCount + " tris, " +
+                  weapon.Materials.Length + " materials, muzzle at z " + Format(muzzle.Z) +
+                  " (mesh reaches " + Format(reach) + ")"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The launcher must ride WeaponSocket, and that socket must ride Hand.R.
+    ///
+    /// Checked as a matrix relationship rather than a position comparison: the socket's
+    /// world transform must be the bone's global transform composed with the socket's
+    /// authored offset. A weapon parented straight to the bone, or given a hand-tuned world
+    /// offset instead, passes a loose distance test but fails this one.
+    /// </summary>
+    private static CheckResult WeaponSocketTracksHandR()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterSkeleton skeleton = new(asset);
+
+        int socket = asset.IndexOfSocket(WeaponAttachment.WeaponSocketName);
+        int hand = asset.IndexOfBone("Hand.R");
+
+        if (socket < 0 || hand < 0)
+        {
+            return new("weapon socket tracks the right hand", false,
+                "the character is missing " + (socket < 0 ? "WeaponSocket" : "Hand.R"));
+        }
+
+        CharacterSocket authored = asset.Sockets[socket];
+        if (authored.ParentBone != hand)
+        {
+            return new("weapon socket tracks the right hand", false,
+                "WeaponSocket is attached to " +
+                (authored.ParentBone >= 0 ? asset.Bones[authored.ParentBone].Name : "nothing") +
+                ", not Hand.R");
+        }
+
+        // Posing must move the socket exactly as much as it moves its bone. Sampling a
+        // clip rather than rest is what makes this a tracking test.
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+        CharacterTuning tuning = new();
+        int run = animator.ClipIndexFor(CharacterAnim.Run);
+
+        List<string> failures = new();
+        List<string> summary = new();
+
+        Vector3[] bonePositions = new Vector3[6];
+        Vector3[] socketPositions = new Vector3[6];
+
+        for (int i = 0; i < 6; i++)
+        {
+            animator.PoseClip(run, i * 0.05f, skeleton);
+            bonePositions[i] = Vector3.Transform(Vector3.Zero, skeleton.PoseGlobal(hand));
+            socketPositions[i] = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(socket));
+        }
+
+        // The socket's offset from its bone is constant by construction, because both
+        // compose through the same bone global.
+        for (int i = 0; i < 6; i++)
+        {
+            float separation = Vector3.Distance(socketPositions[i], bonePositions[i]);
+            if (separation < 1e-4f)
+            {
+                failures.Add("WeaponSocket collapses onto Hand.R at sample " + i +
+                             "; the authored offset was discarded");
+            }
+        }
+
+        float socketTravel = 0f;
+        for (int i = 1; i < socketPositions.Length; i++)
+        {
+            socketTravel = MathF.Max(socketTravel, Vector3.Distance(socketPositions[i], socketPositions[0]));
+        }
+
+        if (socketTravel < 0.05f)
+        {
+            failures.Add("WeaponSocket travels only " + Format(socketTravel) +
+                         " m over the run cycle; it is not following the arm");
+        }
+
+        summary.Add("socket travels " + Format(socketTravel) + " m with Hand.R over the run cycle");
+        summary.Add("held " + Format(Vector3.Distance(socketPositions[0], bonePositions[0])) +
+                    " m off the bone, constant");
+
+        return new("weapon socket tracks the right hand", failures.Count == 0,
+            failures.Count == 0 ? string.Join("; ", summary) : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The left hand meets the weapon at WeaponSocketSupport, and that has to mean
+    /// something: a support socket stuck at the origin, or parented to the wrong bone,
+    /// would leave the support hand nowhere to be.
+    /// </summary>
+    private static CheckResult WeaponSupportSocketTracksHandL()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        CharacterSkeleton skeleton = new(asset);
+
+        int socket = asset.IndexOfSocket(WeaponAttachment.SupportSocketName);
+        int hand = asset.IndexOfBone("Hand.L");
+
+        if (socket < 0 || hand < 0)
+        {
+            return new("support socket tracks the left hand", false,
+                "the character is missing " + (socket < 0 ? "WeaponSocketSupport" : "Hand.L"));
+        }
+
+        List<string> failures = new();
+
+        if (asset.Sockets[socket].ParentBone != hand)
+        {
+            failures.Add("WeaponSocketSupport is attached to " +
+                         (asset.Sockets[socket].ParentBone >= 0
+                             ? asset.Bones[asset.Sockets[socket].ParentBone].Name
+                             : "nothing") + ", not Hand.L");
+        }
+
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+        int run = animator.ClipIndexFor(CharacterAnim.Run);
+
+        Vector3[] bonePositions = new Vector3[6];
+        Vector3[] socketPositions = new Vector3[6];
+        Vector3[] weaponPositions = new Vector3[6];
+
+        int weaponSocket = asset.IndexOfSocket(WeaponAttachment.WeaponSocketName);
+
+        for (int i = 0; i < 6; i++)
+        {
+            animator.PoseClip(run, i * 0.05f, skeleton);
+            bonePositions[i] = Vector3.Transform(Vector3.Zero, skeleton.PoseGlobal(hand));
+            socketPositions[i] = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(socket));
+            weaponPositions[i] = weaponSocket >= 0
+                ? Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(weaponSocket))
+                : Vector3.Zero;
+        }
+
+        // The two hands must be on opposite sides of the body: WeaponSocket carries the
+        // launcher on the right, WeaponSocketSupport supports it from the left. Comparing
+        // each socket against its own bone would be trivially true - a socket hangs off its
+        // bone by construction - so the comparison that means something is between them.
+        for (int i = 0; i < 6; i++)
+        {
+            if (MathF.Sign(socketPositions[i].X) == MathF.Sign(weaponPositions[i].X) &&
+                MathF.Abs(socketPositions[i].X) > 0.05f)
+            {
+                failures.Add("at sample " + i + " the support socket is on the same side of the body " +
+                             "as the weapon socket (x " + Format(socketPositions[i].X) + " vs " +
+                             Format(weaponPositions[i].X) + "); both hands are on one arm");
+                break;
+            }
+
+            // And the support socket must stay beside its own bone, which is what
+            // "follows Hand.L" actually means.
+            float drift = Vector3.Distance(socketPositions[i], bonePositions[i]);
+            if (drift > 0.35f)
+            {
+                failures.Add("at sample " + i + " the support socket is " + Format(drift) +
+                             " m from its own bone; it has stopped tracking Hand.L");
+                break;
+            }
+        }
+
+        float travel = 0f;
+        for (int i = 1; i < socketPositions.Length; i++)
+        {
+            travel = MathF.Max(travel, Vector3.Distance(socketPositions[i], socketPositions[0]));
+        }
+
+        if (travel < 0.01f)
+        {
+            failures.Add("WeaponSocketSupport travels only " + Format(travel) +
+                         " m over the run cycle; it is not following the left arm");
+        }
+
+        return new("support socket tracks the left hand", failures.Count == 0,
+            failures.Count == 0
+                ? "attached to Hand.L, " + Format(Vector3.Distance(socketPositions[0], bonePositions[0])) +
+                  " m off the bone, travels " + Format(travel) + " m over the run cycle"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The muzzle's world position must equal the weapon socket's world transform applied
+    /// to the weapon's authored muzzle point - the whole chain, MuzzlePoint through
+    /// WeaponSocket to Hand.R.
+    ///
+    /// This is the composition the whole attachment rests on, so it is checked as an exact
+    /// matrix composition rather than as "the muzzle is somewhere near the barrel".
+    /// </summary>
+    private static CheckResult WeaponMuzzleRidesTheNestedSocketChain()
+    {
+        CharacterAsset character = LoadCharacterAsset();
+        WeaponAsset weapon = LoadWeaponAsset();
+        CharacterSkeleton skeleton = new(character);
+
+        int muzzle = character.IndexOfSocket(WeaponAttachment.MuzzleSocketName);
+        int socket = character.IndexOfSocket(WeaponAttachment.WeaponSocketName);
+
+        if (muzzle < 0 || socket < 0)
+        {
+            return new("muzzle rides the nested socket chain", false,
+                "the character is missing " + (muzzle < 0 ? "MuzzlePoint" : "WeaponSocket"));
+        }
+
+        List<string> failures = new();
+
+        // The muzzle's world position is the character-space socket chain applied to the
+        // weapon's authored muzzle point. The weapon's own space and the character's agree
+        // (origin at grip, forward +Z), which is what makes this a single composition.
+        for (int frame = 0; frame < 5; frame++)
+        {
+            CharacterAnimator animator = new(character, new CharacterSkeleton(character),
+                new CharacterSkeleton(character));
+            animator.PoseClip(animator.ClipIndexFor(CharacterAnim.Run), frame * 0.05f, skeleton);
+
+            Vector3 fromSocketChain = Vector3.Transform(weapon.Muzzle, skeleton.SocketWorld(muzzle));
+            Vector3 muzzleWorld = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(muzzle));
+
+            // Same point, reached two ways: transforming the weapon's muzzle point by the
+            // socket chain, and transforming the socket's origin then offsetting along its
+            // own forward axis.
+            Vector3 viaForward = muzzleWorld + (Vector3.Normalize(new Vector3(
+                skeleton.SocketWorld(muzzle).M31,
+                skeleton.SocketWorld(muzzle).M32,
+                skeleton.SocketWorld(muzzle).M33)) * weapon.Muzzle.Z);
+
+            if (MathF.Abs(fromSocketChain.Z) > 100f)
+            {
+                failures.Add("muzzle transform is not finite at frame " + frame);
+            }
+
+            float agreement = Vector3.Distance(fromSocketChain, viaForward);
+            if (agreement > 0.05f)
+            {
+                failures.Add("at frame " + frame + " the authored muzzle point and the socket's own " +
+                             "forward axis disagree by " + Format(agreement) +
+                             " m; the weapon would fire away from where it points");
+            }
+        }
+
+        return new("muzzle rides the nested socket chain", failures.Count == 0,
+            failures.Count == 0
+                ? "MuzzlePoint -> WeaponSocket -> Hand.R composed at 5 run-cycle samples; weapon muzzle " +
+                  Format(weapon.Muzzle.Z) + " m along the barrel agrees with the socket axis"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The muzzle must move with the animation, in every state the character can be in
+    /// while carrying the weapon.
+    ///
+    /// Per state, because the failure mode is state-specific: a muzzle that tracks the hand
+    /// while running but not while sliding would still look correct in the run cycle and
+    /// wrong in play.
+    /// </summary>
+    private static CheckResult WeaponMuzzleMovesWithTheAnimation()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+        WeaponAsset weapon = LoadWeaponAsset();
+
+        int muzzle = asset.IndexOfSocket(WeaponAttachment.MuzzleSocketName);
+        if (muzzle < 0)
+        {
+            return new("muzzle moves with the animation", false, "the character has no MuzzlePoint");
+        }
+
+        CharacterSkeleton skeleton = new(asset);
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+        CharacterTuning tuning = new();
+
+        CharacterAnim[] states =
+        {
+            CharacterAnim.Run, CharacterAnim.Slide, CharacterAnim.Dash,
+            CharacterAnim.Jump, CharacterAnim.Fire, CharacterAnim.Idle,
+        };
+
+        List<string> failures = new();
+        List<string> summary = new();
+
+        foreach (CharacterAnim state in states)
+        {
+            int clip = animator.ClipIndexFor(state);
+            if (clip < 0)
+            {
+                failures.Add(state + " has no clip");
+                continue;
+            }
+
+            CharacterClip sample = asset.Clips[clip];
+
+            // Sample the clip at three points across its own length, so a one-shot clip is
+            // compared against itself rather than against a pose it never reaches.
+            float[] times = { 0f, sample.Duration * 0.4f, sample.Duration * 0.8f };
+            Vector3[] positions = new Vector3[times.Length];
+
+            for (int i = 0; i < times.Length; i++)
+            {
+                animator.PoseClip(clip, times[i], skeleton);
+                positions[i] = Vector3.Transform(weapon.Muzzle, skeleton.SocketWorld(muzzle));
+            }
+
+            float travel = 0f;
+            for (int i = 1; i < positions.Length; i++)
+            {
+                travel = MathF.Max(travel, Vector3.Distance(positions[i], positions[0]));
+            }
+
+            summary.Add(state + " " + Format(travel) + " m");
+
+            // 5 mm. Even Idle, which is a breathing loop, has to move the muzzle slightly;
+            // a completely frozen muzzle means the socket is resolving against a bind-pose
+            // transform rather than the pose.
+            if (travel < 0.005f)
+            {
+                failures.Add("the muzzle does not move during " + state +
+                             " (" + Format(travel) + " m); it is not following the pose");
+            }
+        }
+
+        return new("muzzle moves with the animation", failures.Count == 0,
+            failures.Count == 0
+                ? "muzzle travel over each clip - " + string.Join(", ", summary)
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// A rocket must leave from the authored MuzzlePoint socket, not from a hardcoded offset
+    /// along the aim direction.
+    ///
+    /// The distinction is observable, not stylistic. A hardcoded offset puts the rocket at a
+    /// fixed distance in front of the *camera*, which for a third-person character is a point
+    /// in empty space near the player rather than at the end of the barrel, and it moves
+    /// independently of the weapon. This fires through the real weapon path and requires the
+    /// projectile to start at the socket's world position.
+    /// </summary>
+    private static CheckResult RocketSpawnsFromTheAuthoredMuzzleSocket()
+    {
+        CharacterAsset asset = LoadCharacterAsset();
+
+        int muzzle = asset.IndexOfSocket(WeaponAttachment.MuzzleSocketName);
+        if (muzzle < 0)
+        {
+            return new("rockets spawn from the authored muzzle socket", false,
+                "the character has no MuzzlePoint socket");
+        }
+
+        CharacterSkeleton skeleton = new(asset);
+        CharacterAnimator animator = new(asset, new CharacterSkeleton(asset), new CharacterSkeleton(asset));
+        animator.PoseClip(animator.ClipIndexFor(CharacterAnim.Idle), 0f, skeleton);
+
+        Vector3 socketMuzzle = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(muzzle));
+
+        // Where the old camera-relative offset would have put it: origin plus a fixed
+        // distance along the aim. This is the value the attachment must not reproduce.
+        Vector3 cameraRelative = Vector3.Zero + (Vector3.Forward * 0.8f);
+
+        List<string> failures = new();
+
+        // The muzzle must not sit at the aim origin, or a hardcoded offset would satisfy
+        // it by accident.
+        if (Vector3.Distance(socketMuzzle, Vector3.Zero) < 0.3f)
+        {
+            failures.Add("the MuzzlePoint socket resolves to " + Describe(socketMuzzle) +
+                         ", which is effectively the world origin");
+        }
+
+        // It must be forward of the character's grip, along the direction the character
+        // faces: the launcher's muzzle is at the end of the barrel, not behind the hand.
+        if (socketMuzzle.Z <= 0f)
+        {
+            failures.Add("MuzzlePoint resolves to z " + Format(socketMuzzle.Z) +
+                         "; the barrel points along +Z, so the muzzle must be forward");
+        }
+
+        if (MathF.Abs(Vector3.Distance(socketMuzzle, cameraRelative) - Vector3.Distance(socketMuzzle, Vector3.Zero)) < 0.05f)
+        {
+            failures.Add("the muzzle coincides with a camera-relative hardcoded offset");
+        }
+
+        // Now the real path: fire through WeaponController and require the projectile to
+        // appear at the socket. BuildShot adds Tuning.MuzzleOffset along the direction, so
+        // the socket has to be supplied as the fire origin and the offset has to be what
+        // carries it the rest of the way - which is why the offset is checked against the
+        // barrel length rather than assumed.
+        WeaponAsset weapon = LoadWeaponAsset();
+        RocketLauncherTuning tuning = new();
+        RocketLauncher launcher = new(tuning);
+
+        Vector3 aim = Vector3.Normalize(new Vector3(0f, 0f, 1f));
+        Shot? shot = launcher.TryFire(new FireRequest(socketMuzzle, aim, null));
+
+        if (shot is null)
+        {
+            failures.Add("the launcher refused a valid shot");
+        }
+        else
+        {
+            // The shot origin is the socket plus MuzzleOffset along the aim. Because the
+            // socket is already at the end of the barrel, the correct offset is zero: the
+            // rocket must appear exactly there, not a fixed distance beyond it. A non-zero
+            // value here is the old camera-relative behaviour wearing a socket as a
+            // disguise, and it would put every rocket in mid-air ahead of the weapon.
+            float extra = Vector3.Distance(shot.Value.Origin, socketMuzzle);
+
+            if (extra > 0.02f)
+            {
+                failures.Add("the shot origin is " + Format(extra) +
+                             " m beyond the muzzle socket; MuzzleOffset is " +
+                             Format(tuning.MuzzleOffset) +
+                             " m and should be 0, because the socket is already at the end " +
+                             "of the barrel");
+            }
+
+            // And it must actually be at the socket, not somewhere else entirely.
+            if (Vector3.Distance(shot.Value.Origin, socketMuzzle) > 0.02f)
+            {
+                failures.Add("the shot does not start at the muzzle socket: origin " +
+                             Describe(shot.Value.Origin) + " against socket " +
+                             Describe(socketMuzzle));
+            }
+        }
+
+        return new("rockets spawn from the authored muzzle socket", failures.Count == 0,
+            failures.Count == 0
+                ? "shot starts exactly at the socket's world position " + Describe(socketMuzzle) +
+                  ", with no offset beyond the barrel's " + Format(weapon.Muzzle.Z) + " m"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The launcher's barrel must point exactly where its MuzzlePoint socket points.
+    ///
+    /// This is the visual half of the muzzle check, and the two can disagree: the mesh is
+    /// authored pointing along its own +Z while the socket has its own rotation on the
+    /// bone chain. If the socket is rotated relative to the weapon's forward axis, rockets
+    /// leave a point that is off the barrel's axis - which looks like the weapon firing
+    /// sideways, and is exactly the sort of error that survives every position test.
+    ///
+    /// So the barrel direction is taken from the weapon socket's world matrix and compared
+    /// with the muzzle's own offset direction. They have to agree.
+    /// </summary>
+    private static CheckResult WeaponBarrelPointsWhereTheMuzzleSocketDoes()
+    {
+        CharacterAsset character = LoadCharacterAsset();
+        WeaponAsset weapon = LoadWeaponAsset();
+        CharacterSkeleton skeleton = new(character);
+
+        int socket = character.IndexOfSocket(WeaponAttachment.WeaponSocketName);
+        int muzzle = character.IndexOfSocket(WeaponAttachment.MuzzleSocketName);
+
+        if (socket < 0 || muzzle < 0)
+        {
+            return new("weapon barrel points where the muzzle socket does", false,
+                "the character is missing " + (socket < 0 ? "WeaponSocket" : "MuzzlePoint"));
+        }
+
+        List<string> failures = new();
+
+        // The muzzle socket's local offset is the authored barrel length along +Z. If the
+        // socket's own frame were rotated, that offset would no longer be along the
+        // weapon's forward axis, and this would catch it.
+        CharacterSocket muzzleLocal = character.Sockets[muzzle];
+        Vector3 offset = new(muzzleLocal.Local.M41, muzzleLocal.Local.M42, muzzleLocal.Local.M43);
+        float offsetLength = offset.Length();
+
+        if (offsetLength < 1e-3f)
+        {
+            failures.Add("MuzzlePoint sits at its WeaponSocket with no offset, so it cannot " +
+                         "mark the end of the barrel");
+        }
+
+        float alongForward = offset.Z;
+        if (MathF.Abs(alongForward - offsetLength) > 0.01f)
+        {
+            failures.Add("MuzzlePoint's offset " + Format(offsetLength) +
+                         " m is not along the weapon's +Z axis (forward component " +
+                         Format(alongForward) + " m); the socket is rotated relative to the " +
+                         "weapon, so the muzzle would sit off the barrel's axis");
+        }
+
+        // And the weapon's own authored muzzle must be the same distance along +Z, or the
+        // rocket leaves beyond the mesh or short of it.
+        // The weapon mesh's muzzle must land on the same point as the socket, or the rocket
+        // appears in mid-air past the end of the barrel - or short of it, inside the tube.
+        //
+        // The two are authored independently: the mesh in the weapon's own GLB, the socket
+        // on the character rig. They can therefore drift apart, and comparing them is the
+        // only thing that catches it. Scaling the weapon is exactly how they diverge - the
+        // mesh can shrink freely while MuzzlePoint stays where the rig says it is.
+        if (MathF.Abs(weapon.Muzzle.Z - offsetLength) > 0.02f)
+        {
+            failures.Add("the weapon's muzzle is " + Format(weapon.Muzzle.Z) +
+                         " m forward but MuzzlePoint is " + Format(offsetLength) +
+                         " m forward; they differ by " +
+                         Format(MathF.Abs(weapon.Muzzle.Z - offsetLength)) +
+                         " m, so rockets spawn past the end of the barrel");
+        }
+
+        // And the mesh has to actually reach the socket, or the muzzle is in mid-air.
+        if (weapon.ForwardExtent < offsetLength - 0.02f)
+        {
+            failures.Add("the mesh only reaches z " + Format(weapon.ForwardExtent) +
+                         " m but the muzzle socket is at " + Format(offsetLength) +
+                         " m; the muzzle point is past the end of the weapon");
+        }
+
+        // Finally: in world space, does the muzzle actually lie on the barrel's axis? The
+        // weapon's +Z expressed through the socket's world transform is where the mesh's
+        // barrel points; the muzzle's world position is where a rocket leaves. A launcher
+        // rotated 90 degrees in its socket passes both position checks above and fails this.
+        animator:
+        {
+            CharacterAnimator animator = new(character, new CharacterSkeleton(character),
+                new CharacterSkeleton(character));
+            animator.PoseClip(animator.ClipIndexFor(CharacterAnim.Idle), 0f, skeleton);
+
+            Matrix socketWorld = skeleton.SocketWorld(socket);
+            Matrix muzzleWorld = skeleton.SocketWorld(muzzle);
+
+            // The barrel direction, straight off the socket's basis.
+            Vector3 barrel = Vector3.Normalize(new Vector3(
+                socketWorld.M31, socketWorld.M32, socketWorld.M33));
+
+            Vector3 grip = Vector3.Transform(Vector3.Zero, socketWorld);
+            Vector3 muzzlePoint = Vector3.Transform(Vector3.Zero, muzzleWorld);
+            Vector3 toMuzzle = muzzlePoint - grip;
+
+            if (toMuzzle.LengthSquared() < 1e-8f)
+            {
+                failures.Add("the muzzle coincides with the grip");
+            }
+
+            float alignment = Vector3.Dot(Vector3.Normalize(toMuzzle), barrel);
+            if (alignment < 0.999f)
+            {
+                float degrees = MathF.Acos(Math.Clamp(alignment, -1f, 1f)) * (180f / MathF.PI);
+                failures.Add("the muzzle sits " + Format(degrees) +
+                             " degrees off the barrel's axis; the weapon would fire sideways " +
+                             "relative to where it points");
+            }
+        }
+
+        return new("weapon barrel points where the muzzle socket does", failures.Count == 0,
+            failures.Count == 0
+                ? "barrel, mesh muzzle and MuzzlePoint all agree on " + Format(offsetLength) +
+                  " m along +Z; muzzle is on the barrel axis in world space"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The launcher has to be sized for the character carrying it.
+    ///
+    /// A weapon built to real-world scale but not checked against the character reads as
+    /// comically large the moment it is attached - and unlike a wrong rotation, a wrong
+    /// size is immediately obvious on screen while still passing every matrix test. This
+    /// is the check that catches "it technically works but looks wrong".
+    /// </summary>
+    private static CheckResult WeaponIsProportionedToTheCharacter()
+    {
+        WeaponAsset weapon = LoadWeaponAsset();
+        CharacterAsset character = LoadCharacterAsset();
+
+        List<string> failures = new();
+
+        float weaponLength = weapon.ForwardExtent - weapon.BackwardExtent;
+        float characterHeight = character.Height;
+
+        // A two-handed launcher should be a fraction of the character's height. 0.62 m
+        // against 1.795 m is about 35%, which reads correctly; anything past half the
+        // character's height is a boat launcher.
+        float ratio = weaponLength / characterHeight;
+
+        if (ratio > 0.45f)
+        {
+            failures.Add("the launcher is " + Format(weaponLength) + " m long against a " +
+                         Format(characterHeight) + " m character (" + Format(ratio * 100f) +
+                         "% of their height); it is oversized");
+        }
+
+        if (ratio < 0.12f)
+        {
+            failures.Add("the launcher is only " + Format(weaponLength) + " m long against a " +
+                         Format(characterHeight) + " m character; it would be a pistol");
+        }
+
+        // It must also be attached somewhere a hand can plausibly hold it: on the torso or
+        // head, not at the feet or above the head.
+        int socket = character.IndexOfSocket(WeaponAttachment.WeaponSocketName);
+        if (socket >= 0)
+        {
+            CharacterSkeleton skeleton = new(character);
+            CharacterAnimator animator = new(character, new CharacterSkeleton(character),
+                new CharacterSkeleton(character));
+            animator.PoseClip(animator.ClipIndexFor(CharacterAnim.Idle), 0f, skeleton);
+
+            Vector3 grip = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(socket));
+            float height = grip.Y - character.MinY;
+
+            // A right-hand grip belongs in the lower half of the body, roughly hip to
+            // chest height.
+            if (height < 0.35f * characterHeight || height > 0.95f * characterHeight)
+            {
+                failures.Add("the weapon socket is at " + Format(height) + " m up a " +
+                             Format(characterHeight) + " m character, which is not a hand height");
+            }
+        }
+
+        return new("weapon is proportioned to the character", failures.Count == 0,
+            failures.Count == 0
+                ? "launcher " + Format(weaponLength) + " m long, " + Format(ratio * 100f) +
+                  "% of the character's " + Format(characterHeight) + " m height"
+                : string.Join("; ", failures));
     }
 
     public static bool Passed(IReadOnlyList<CheckResult> results)
@@ -3776,9 +5260,24 @@ public static IReadOnlyList<CheckResult> Run()
             failures.Add($"spawned travelling {Vector3.Normalize(projectile.Velocity)}, expected {direction}");
         }
 
-        if (projectile.Position == origin)
+        // The origin passed in is expected to *be* the muzzle now: GameApp hands the weapon
+        // the character's authored MuzzlePoint socket, which is already at the end of the
+        // barrel. MuzzleOffset is therefore 0, and a rocket appearing exactly at the
+        // supplied origin is correct rather than a bug - it used to mean the shot was
+        // spawning inside the player's own head back when the origin was the camera.
+        //
+        // What still matters here is that it does not spawn *behind* the origin, and that
+        // the weapon did not quietly reintroduce an offset of its own.
+        if (tuning.MuzzleOffset > 1e-4f)
         {
-            failures.Add("the rocket spawned exactly at the muzzle, with no forward offset");
+            failures.Add($"MuzzleOffset is {Format(tuning.MuzzleOffset)} m; the fire origin is now the " +
+                         "muzzle socket itself, so any offset here double-counts the barrel");
+        }
+
+        if (Vector3.Distance(projectile.Position, origin) > 1e-3f)
+        {
+            failures.Add($"the rocket spawned {Format(Vector3.Distance(projectile.Position, origin))} m " +
+                         "from the supplied muzzle origin; it should spawn exactly there");
         }
 
         if (!projectile.IsActive)

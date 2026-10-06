@@ -29,8 +29,14 @@ namespace MovementShooter.App;
     /// <summary>How the first-person launcher is held and how it recoils. Presentation only.</summary>
     public Weapons.ViewModelTuning WeaponViewModel { get; } = new();
 
+    /// <summary>How the full-body character is scaled, blended and paced. Presentation only.</summary>
+    public Character.CharacterTuning Character { get; } = new();
+
     /// <summary>Shows the development-only player readout in the corner of the window.</summary>
     public bool ShowPlayerDebug { get; set; } = true;
+
+    /// <summary>Renders the character offscreen to a contact sheet and exits. Development-only.</summary>
+    public bool RunCharacterPreview { get; set; }
 
     /// <summary>Headless-ish render validation: renders N frames into an offscreen target and exits.</summary>
     public bool RunSelfTest { get; set; }
@@ -64,6 +70,9 @@ namespace MovementShooter.App;
             {
                 case "--selftest":
                     config.RunSelfTest = true;
+                    break;
+                case "--char-preview":
+                    config.RunCharacterPreview = true;
                     break;
                 case "--physics-test":
                     config.RunPhysicsTest = true;

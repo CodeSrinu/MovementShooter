@@ -19,4 +19,22 @@
     <PackageReference Include="MonoGame.Framework.DesktopGL" Version="3.8.5.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      The character asset, generated at build time by tools\KineticAssetTool from
+      KINETIC_Character.glb. Embedded rather than read from disk so the game has no
+      asset path to resolve and works from any working directory.
+
+      LogicalName is set explicitly because the default would be
+      "MovementShooter.Assets.Models.KINETIC_Character.bin", which breaks silently
+      whenever the file moves. CharacterAsset.ResourceName must match this.
+    -->
+    <EmbeddedResource Include="Assets\Models\KINETIC_Character.bin"
+                      LogicalName="KINETIC_Character.bin" />
+    <!-- The weapon is a separate asset from the character: rigid geometry, no skin, no
+         animation, attached at runtime through the character's socket system. -->
+    <EmbeddedResource Include="Assets\Models\KINETIC_RocketLauncher.bin"
+                      LogicalName="KINETIC_RocketLauncher.bin" />
+  </ItemGroup>
+
 </Project>

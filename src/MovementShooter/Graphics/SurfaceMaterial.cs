@@ -66,6 +66,27 @@ public sealed class SurfaceMaterial : IDisposable
         mesh.Draw(_device);
     }
 
+    /// <summary>
+    /// Applies every technique pass without drawing, for callers that own their own
+    /// geometry and buffers - the skinned character draws indexed submesh ranges out of
+    /// a dynamic vertex buffer, which <see cref="Draw"/> cannot express.
+    ///
+    /// Added so the character lights from the same single rig as the arena instead of a
+    /// fourth copy of the light setup in a renderer.
+    /// </summary>
+    public void ApplyPasses()
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(SurfaceMaterial));
+        }
+
+        foreach (EffectPass pass in _effect.CurrentTechnique.Passes)
+        {
+            pass.Apply();
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)

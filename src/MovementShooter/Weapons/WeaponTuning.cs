@@ -38,8 +38,19 @@ public sealed class RocketLauncherTuning : WeaponTuning
         // are never confused on the same key.
         FireInterval = 0.75f;
 
-        // Far enough ahead of the camera that the rocket does not appear to spawn inside the player's own head.
-        MuzzleOffset = 0.8f;
+        // How far the projectile is placed beyond the supplied origin.
+        //
+        // This was 0.8 m of "far enough ahead of the camera that the rocket does not appear
+        // to spawn inside the player's own head", which was only ever right because the
+        // origin handed in was the camera. The origin is now the character's authored
+        // MuzzlePoint socket - a real point at the end of the barrel - so this no longer
+        // needs to clear the camera and should not add any distance of its own: the socket
+        // is already where the rocket should appear.
+        //
+        // Kept as a real knob rather than removed because it is still the right place for a
+        // small clearance, and because a weapon whose origin arrives from elsewhere may
+        // still need one.
+        MuzzleOffset = 0f;
     }
 
     /// <summary>Constant speed of the projectile in metres per second.</summary>
