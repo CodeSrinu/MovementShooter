@@ -24,15 +24,50 @@ Program.cs                       process entry, headless checks, argument errors
       │                            ExplosionSystem. No knowledge of weapons - damage is not weapon-specific.
       ├── Weapons/                 WeaponController, Weapon, RocketLauncher, WeaponTuning,
       │                            ProjectileSystem, WeaponInput
+      ├── Character/               CharacterBody (asset + skeleton + skin + animator + renderer),
+       │                            CharacterAsset/CharacterSkin/CharacterSkeleton/CharacterAnimator,
+       │                            CharacterTuning, WeaponAsset, WeaponRenderer, WeaponAttachment
       ├── Targets/                 TestDummy, TestDummyRenderer
       ├── UI/                      BitmapFont, TextRenderer, PlayerDebugOverlay,
       │                            MovementEffectRenderer, CombatEffectRenderer
       ├── Graphics/                MeshBuilder -> MeshData -> GpuMesh, SurfaceMaterial
-      ├── Diagnostics/             SelfTestSession (render), PhysicsSelfTest (player, physics and combat)
+      ├── Diagnostics/             SelfTestSession (render), PhysicsSelfTest (player, physics and combat),
+       │                            CharacterPreview (offscreen contact sheet, --char-preview)
      └── Core/                    Log, MathHelpers, PngWriter, ConsoleHost
 ```
 
 `GameApp` is the only place allowed to know about all of the others. Systems never construct each other.
+
+### Assets and the build-time converter
+
+There is **no content pipeline**, so `.glb` files are not loaded at runtime. Instead `tools/KineticAssetTool`
+converts an authored `.glb` into a compact runtime `.bin` that is embedded as a resource
+(`MovementShooter.csproj`), and the game loads it from the assembly with no file path to resolve.
+
+```
+Assets/Blender/KINETIC_Character.blend   authored source (Blender 5.1)
+        │  glTF export
+        ▼
+Assets/Models/KINETIC_Character.glb     interchange
+        │  KineticAssetTool --input ... --output ...
+        ▼
+Assets/Models/KINETIC_Character.bin     runtime blob, embedded
+        │  CharacterAsset.Load()
+        ▼
+1880 verts · 17 bones · 3 sockets · 8 clips
+```
+
+The converter **validates before it writes** and refuses rather than emitting a plausible-looking asset from a
+subtly wrong input — a bad weight, a second root, a skin whose joints do not reach the mesh. The symptom of a
+silently bad conversion is a character with a collapsed limb several systems away from the tool that caused it,
+which is far more expensive to find than a refusal. Both asset formats are versioned by magic and an explicit
+version number, so a stale blob fails loudly instead of loading as garbage.
+
+**The `.blend` is authored in a newer Blender than the one that may open it.** The committed character file was
+written by Blender 5.1; Blender 5.0 reports *"File written by newer Blender binary, expect loss of data"* on
+load. Reading is safe and complete. **Saving from the older version is the destructive operation** — it rewrites
+the file in the older format. So authoring work happens in a copy, the export comes from the copy, and the
+committed `.blend` is only replaced with explicit approval.
 
 ## Naming
 
@@ -177,6 +212,68 @@ And the invariant that caused a wall-climbing bug:
   horizontal. Do not relax `JumpSupportTolerance` or the ascending check without re-running
   `--physics-test`.
 
+### Weapon presentation: one canonical asset, two viewpoints
+
+**There is exactly one weapon design.** `KINETIC_RocketLauncher` is the weapon; how it is *shown* depends on
+whose body it is attached to. Two launchers with two sets of proportions, two muzzle positions or two recoil
+animations would drift apart the moment either was tuned, and the player would be firing one weapon while
+looking at another.
+
+```
+Authored asset (canonical, single source of truth)
+└── KINETIC_RocketLauncher.glb  →  KINETIC_RocketLauncher.bin  →  WeaponAsset
+
+Third person — any CharacterBody, local or remote
+  CharacterBody
+    └─ pose from CharacterAnimator
+       └─ WeaponSocket ──────────► weapon world transform  (WeaponAttachment)
+          └─ MuzzlePoint          ► projectile origin
+                                    WeaponSocketSupport ────► left hand support
+
+First person — the local player's own view only
+  FPS arms + hands
+    └─ camera-relative transform (own projection, own near plane, cleared depth)
+       └─ the SAME canonical launcher asset and materials
+          └─ the SAME MuzzlePoint, exposed rather than re-authored
+```
+
+**Gameplay decisions are made exactly once, in exactly one place:**
+
+| Decision | Owner | Never |
+| --- | --- | --- |
+| Where the projectile appears | `MuzzlePoint` socket on the character | the camera, or a hardcoded offset |
+| Which way it travels | `PlayerCamera.Forward` | wherever the animation points the arm |
+| That a shot happened | `WeaponController.TryFire` → `ExplosionSystem` | the viewmodel or the sockets |
+
+**Why the origin is the socket but the direction is the camera.** They answer different questions. The muzzle
+is a physical question — where the barrel actually is — and it must track the animation, or a rocket leaves
+the air beside the launcher. The direction is a *player's* decision, made with a mouse, and it must not drift
+toward wherever the current clip happens to be pointing the arm mid-dash. Coupling aim to animation would make
+the weapon fight the player at exactly the moments they are trying hardest.
+
+**Why the third-person weapon is presentation-only.** `WeaponAttachment` holds a `CharacterBody` and asks it
+for its sockets each frame. It never touches a bone, never holds a transform of its own, and writes nothing
+back. That is what makes a second character a one-line change: hand `WeaponAttachment` a different
+`CharacterBody`. It is also why the launcher follows Run, Slide, Dash, Jump and Fire with no per-clip weapon
+pose — the sockets already do it.
+
+**Why the first-person viewmodel may differ, and how much.** It is allowed its own camera-relative transform,
+its own field of view, its own near plane and its own recoil and muzzle-flash animation, because a held object
+at 0.4 m in a 90-degree projection is unusably distorted and is otherwise clipped by walls. It is *not*
+allowed its own mesh, its own materials or its own muzzle position. A viewmodel is a **camera**, not a weapon.
+
+**Sockets are attachment points, not bones.** They are Blender Empties parented to bones or to each other,
+carrying no skin weights and never part of the skinning hierarchy (`CharacterAsset.Sockets` is deliberately
+separate from `CharacterAsset.Bones`). They compose alongside the skeleton:
+`CharacterSkeleton.SocketWorld` resolves `Local * parentGlobal`, recursing through a socket parent before a bone
+parent, which is how `MuzzlePoint → WeaponSocket → Hand.R` resolves. Treating a socket as a bone would change the
+skeleton's shape and every index derived from it.
+
+**Authored data, never runtime offsets.** Weapon placement, grip orientation and the support-hand position are
+authored in the rig. A corrective rotation in C# to make a badly posed launcher look right is a bug being hidden
+in the wrong place: it silently fights the animation on the next clip. If the launcher reads up-and-across during
+Run, that is an authoring fault in the pose or the socket, and it is fixed there.
+
 ### Combat (`MovementShooter.Combat`)
 * `Health` - hit points and the whole of the damage model: cumulative, never regenerating, clamped at zero, and
   dead stays dead. Implements `IDamageable`. No armour, resistance, invulnerability window or healing, because
@@ -224,23 +321,46 @@ would silently discard momentum, and could stop a jump mid-air.
 * `TestDummyRenderer`, `UI.CombatEffectRenderer` - procedural and untextured. Two shared meshes and one unlit
   effect; health bars and rocket bodies are billboards and cylinder instances rather than per-object meshes.
 
-### First-person weapon (`Weapons.WeaponViewModel`, `UI.FirstPersonWeaponRenderer`)
+### First-person viewmodel (`Weapons.WeaponViewModel`, `UI.FirstPersonWeaponRenderer`)
 * `WeaponViewModel` - presentation only: where the model sits relative to the eye, and its recoil and muzzle-flash
   state. No graphics types and no reference to the camera, which is what lets the recoil timing and the flash be
   checked headlessly instead of by eye. The recoil is a damped cosine of the time since the shot, not a
   per-frame spring, so it is frame-rate independent for free - it has to be, because a *held* mouse button would
   otherwise integrate it at the frame rate.
+
+This is a **camera**, not a weapon: it owns the hold transform, the recoil clock and the flash. The mesh it draws
+is the canonical `KINETIC_RocketLauncher` asset, and the muzzle it exposes is the same authored `MuzzlePoint`.
+Its projection is separate from the world's on purpose - a narrower field of view, because a held object under
+the world's 90 degrees is unusably distorted, and a near plane in centimetres, because the model is 0.4 m away.
+The depth buffer is cleared before the pass, so standing against a wall cannot swallow the weapon; the weapon
+model is held inside the player's own collision and giving it real collision is not wanted yet.
+
 ### Diagnostics (`MovementShooter.Diagnostics`)
-Two suites, both driven from `Program` and both exiting with a status code.
+Three suites, all driven from `Program` or a CLI flag, all exiting with a status code.
 
 * `PhysicsSelfTest` runs headless (no window, no GPU) and drives the real `PlayerController` through a real
   physics world: falling, resting, not falling through the floor, standing still, reaching the configured
   speed, jump height, held-jump handling, air-jump prevention, ramp climbing, mouse-look clamping and
-  frame-rate independence. Anything that can be asserted without a GPU belongs here.
+  frame-rate independence. Anything that can be asserted without a GPU belongs here - including the character,
+  its sockets and the weapon attachment, because skinning, skeleton evaluation and clip selection all hold no
+  `GraphicsDevice`.
 * `SelfTestSession` renders into an offscreen `RenderTarget2D`, screenshots it and reports coverage, colour
   diversity and average brightness. Anything visually verifiable belongs here.
+* `CharacterPreview` (`--char-preview`) renders the character offscreen from known angles and one pose per clip
+  into a contact sheet. It exists because the game is first-person and the local character's origin *is* the
+  player's own position, so the body is never in frame during normal play. Without it, "correct materials,
+  correct skinning, correct pose" would be claims rather than observations. It also draws the launcher at the
+  posed socket transform, which is what makes weapon attachment reviewable without a second player.
 
-Keep both green before calling any milestone done.
+Keep all three green before calling any milestone done.
+
+**The screenshot encoder is itself under test.** `PngWriter` hand-rolls PNG and zlib with no image library, so
+nothing else in the project would notice it emitting something malformed - which it did: the Adler-32 was written
+over the last four bytes of the deflate stream instead of after it, so every screenshot was four bytes short of
+its own end-of-block marker. It went unnoticed because the damage falls at the very tail of the pixel data, where
+most decoders paint a correct-looking image and discard the remainder. A verification tool that emits invalid
+files is worse than none, because it reports success on evidence nobody can trust, so `DecodeStrict` re-reads the
+output with an independent implementation and compares it pixel for pixel.
 
 ## Planned systems (not built yet)
 
@@ -249,13 +369,19 @@ Build in this order; each step must keep `--physics-test` and `--selftest` green
 Milestones 1-5 are built. 3 and 4 landed inside `PlayerMovement` rather than as separate files, because slide and
 dash are movement states rather than independent systems; 5 is the `Combat` + `Weapons` + `Targets` trio above.
 
+Milestone 6 - the character, its sockets and weapon attachment - is also built (`Character/`). What remains is
+presentation, not systems: the authored two-hand hold, correct socket orientation, and a first-person viewmodel
+built on the same asset.
+
 | Milestone | Modules | Notes |
 | --- | --- | --- |
-| 6. Weapons | `Weapons/WeaponSwitcher.cs`, `Weapons/Melee/*` | Weapon switching, and the pan/tool mechanic. `Weapon` and `WeaponController` already separate per-weapon behaviour from what the player owns |
-| 7. Enemies | `Entities/Enemy.cs`, ... | Reuse `IDamageable`, `CombatTarget` and the explosion path; the rocket already needs all three |
-| 8. Effects | `Effects/*` | Particles, tracers, screen shake, impact decals. Current rockets and blasts are two shared meshes each |
-| 9. HUD | `UI/Hud.cs`, ... | Needs a real font; comes with the content pipeline decision |
-| 10. Map v2 | `Map/MovementArena.cs` | Rocket-jump sized gaps, risk/reward routes |
+| 6b. Authored hold | rig, sockets, clips | Two-hand pose: `WeaponSocketSupport` meets the left hand. Fixed in the rig, never with a runtime offset |
+| 6c. FPS viewmodel | `UI/FirstPersonWeaponRenderer` | Arms and hands on the canonical launcher asset. A camera, not a second weapon |
+| 7. Weapons | `Weapons/WeaponSwitcher.cs`, `Weapons/Melee/*` | Weapon switching, and the pan/tool mechanic. `Weapon` and `WeaponController` already separate per-weapon behaviour from what the player owns |
+| 8. Enemies | `Entities/Enemy.cs`, ... | Reuse `IDamageable`, `CombatTarget` and the explosion path; the rocket already needs all three. `CharacterBody` was written for this: it takes facts and returns nothing |
+| 9. Effects | `Effects/*` | Particles, tracers, screen shake, impact decals. Current rockets and blasts are two shared meshes each |
+| 10. HUD | `UI/Hud.cs`, ... | Needs a real font; comes with the content pipeline decision |
+| 11. Map v2 | `Map/MovementArena.cs` | Rocket-jump sized gaps, risk/reward routes |
 
 The rocket was built as a *physics force*, not a damage number: `ExplosionSystem` applies an impulse to every
 body in radius through `PhysicsBody.ApplyImpulse`, which is what makes rocket jumping fall out of the same code

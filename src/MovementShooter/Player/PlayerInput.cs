@@ -10,7 +10,8 @@ public readonly record struct PlayerInputState(
     bool SprintHeld,
     bool ToggleCursorRequested,
     bool SlideHeld = false,
-    bool DashPressed = false);
+    bool DashPressed = false,
+    bool CameraModeToggleRequested = false);
 
 /// <summary>
 /// Turns the keyboard into a <see cref="PlayerInputState"/>. Mouse look lives in <see cref="CursorLock"/>
@@ -18,7 +19,7 @@ public readonly record struct PlayerInputState(
 /// be driven by a bot or a replay later without touching movement code.
 /// </summary>
 /// <remarks>
-/// Bindings: WASD move, Space jump, Left Ctrl slide, Left Shift dash, F1 release or capture the cursor.
+/// Bindings: WASD move, Space jump, Left Ctrl slide, Left Shift dash, F1 release or capture the cursor, F3 toggle camera mode.
 /// </remarks>
 public sealed class PlayerInput
 {
@@ -58,6 +59,7 @@ public sealed class PlayerInput
             keyboard.IsKeyDown(Keys.LeftShift) || keyboard.IsKeyDown(Keys.RightShift),
             keyboard.IsKeyDown(Keys.F1),
             keyboard.IsKeyDown(Keys.LeftControl),
-            keyboard.IsKeyDown(Keys.LeftShift));
+            keyboard.IsKeyDown(Keys.LeftShift),
+            keyboard.IsKeyDown(Keys.F3));
     }
 }

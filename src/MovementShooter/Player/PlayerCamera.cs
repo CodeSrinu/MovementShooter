@@ -94,7 +94,7 @@ public sealed class PlayerCamera
     public const float MaximumFieldOfViewDegrees = 170f;
 
     /// <summary>Rotation around the Y axis, in radians. Zero looks along -Z.</summary>
-    public float Yaw { get; private set; }
+    public float Yaw { get; set; }
 
     /// <summary>Rotation around the X axis, in radians. Positive looks up.</summary>
     public float Pitch { get; private set; }
@@ -238,4 +238,9 @@ public sealed class PlayerCamera
     private const float EyeHeightResponsiveness = 24f;
 
     private float _eyeHeight;
+
+    public void Dispose()
+    {
+        // Nothing to dispose for PlayerCamera
+    }
 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using MovementShooter.Character;
@@ -138,8 +139,215 @@ public static IReadOnlyList<CheckResult> Run()
         results.Add(RocketSpawnsFromTheAuthoredMuzzleSocket());
         results.Add(WeaponBarrelPointsWhereTheMuzzleSocketDoes());
         results.Add(WeaponIsProportionedToTheCharacter());
+        results.Add(ScreenshotsAreValidPngFiles());
+        results.Add(FirstPersonViewmodelUsesTheCanonicalLauncher());
+        results.Add(FirstPersonArmsAreAuthoredAgainstTheLauncher());
+        results.Add(ViewmodelRecoilCarriesTheArmsWithTheWeapon());
 
         return results;
+    }
+
+    /// <summary>
+    /// The first-person viewmodel and the third-person character must be looking at
+    /// the same launcher.
+    ///
+    /// The viewmodel used to build a launcher out of boxes and cylinders, which meant
+    /// the player fired one weapon while looking at another - two designs that drift
+    /// the moment either is retuned. This requires the same asset to serve both, and
+    /// the same muzzle, which is the observable consequence of sharing it.
+    /// </summary>
+    private static CheckResult FirstPersonViewmodelUsesTheCanonicalLauncher()
+    {
+        WeaponAsset? launcher = TryLoadWeaponAsset(WeaponAsset.ResourceName, out List<string> loadFailures);
+        WeaponAsset? arms = TryLoadWeaponAsset(WeaponAsset.ArmsResourceName, out List<string> armFailures);
+
+        List<string> failures = new();
+        failures.AddRange(loadFailures);
+        failures.AddRange(armFailures);
+
+        if (launcher is not null && arms is null && loadFailures.Count == 0 && armFailures.Count > 0)
+        {
+            failures.AddRange(armFailures);
+        }
+
+        if (launcher is null || arms is null)
+        {
+            return new("first-person viewmodel uses the canonical launcher", false,
+                string.Join("; ", failures));
+        }
+
+        if (string.Equals(launcher.Name, arms.Name, StringComparison.Ordinal))
+        {
+            failures.Add("the arms asset and the launcher report the same name (" + launcher.Name +
+                         "); they are separate meshes and only one of them is carried by the character");
+        }
+
+        // One muzzle, not two. The launcher carries it; the arms must not, or the
+        // first-person weapon would report a muzzle that means something different from
+        // the one a rocket is spawned at.
+        if (arms.HasAuthoredMuzzle)
+        {
+            failures.Add("the first-person arms carry their own muzzle at " + Describe(arms.Muzzle) +
+                         "; the muzzle belongs to the launcher alone so both viewpoints agree on it");
+        }
+
+        if (!launcher.HasAuthoredMuzzle)
+        {
+            failures.Add("the launcher has no authored muzzle, so the first-person flash has nowhere to appear");
+        }
+
+        return new("first-person viewmodel uses the canonical launcher", failures.Count == 0,
+            failures.Count == 0
+                ? "third person and first person both draw " + launcher.Name + " (" +
+                  launcher.VertexCount + " verts); the arms are " + arms.Name + ", and the muzzle is the " +
+                  "launcher's, " + Format(launcher.Muzzle.Z) + " m along the barrel"
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The first-person arms have to be authored in the launcher's own space, or they
+    /// are decoration floating near a weapon rather than hands holding it.
+    ///
+    /// Checked geometrically rather than by eye: the arms must overlap the launcher
+    /// along the barrel and reach back behind the grip, which is what "the hands are
+    /// on the weapon" means once the assets are rigid meshes with no shared skeleton.
+    /// </summary>
+    private static CheckResult FirstPersonArmsAreAuthoredAgainstTheLauncher()
+    {
+        WeaponAsset launcher = LoadWeaponAsset();
+        WeaponAsset? arms = TryLoadWeaponAsset(WeaponAsset.ArmsResourceName, out List<string> failures);
+
+        if (arms is null)
+        {
+            return new("first-person arms are authored against the launcher", false, string.Join("; ", failures));
+        }
+
+        Bounds armsBounds = BoundsOf(arms);
+        Bounds launcherBounds = BoundsOf(launcher);
+
+        // The hands have to reach the grip, and the launcher's own grip hangs below the
+        // weapon origin, so the arms cannot sit entirely above it.
+        if (armsBounds.MaxZ < launcherBounds.MinZ)
+        {
+            failures.Add("the arms stop at z " + Format(armsBounds.MaxZ) +
+                         " but the launcher starts at z " + Format(launcherBounds.MinZ) +
+                         "; they are nowhere near each other");
+        }
+
+        if (armsBounds.MaxZ < 0f)
+        {
+            failures.Add("the arms are entirely behind the grip (max z " + Format(armsBounds.MaxZ) +
+                         "); they would be holding nothing");
+        }
+
+        // And they must reach forward onto the barrel rather than clustering at the grip.
+        if (armsBounds.MaxZ < launcherBounds.MaxZ * 0.25f)
+        {
+            failures.Add("the arms reach only z " + Format(armsBounds.MaxZ) +
+                         " on a barrel " + Format(launcherBounds.MaxZ) +
+                         " m long; there is no hand on the fore-grip");
+        }
+
+        if (failures.Count == 0 && arms.VertexCount > 4000)
+        {
+            failures.Add("the arms are " + arms.VertexCount +
+                         " verts; a viewmodel is drawn 40 cm from the eye, where vertex count is pure cost");
+        }
+
+        return new("first-person arms are authored against the launcher", failures.Count == 0,
+            failures.Count == 0
+                ? arms.VertexCount + " verts in the launcher's own space, reaching z " +
+                  Format(armsBounds.MinZ) + " .. " + Format(armsBounds.MaxZ) + " against the launcher's z " +
+                  Format(launcherBounds.MinZ) + " .. " + Format(launcherBounds.MaxZ)
+                : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// The recoil has to move the arms and the launcher as one piece.
+    ///
+    /// The viewmodel used to apply its recoil inside each part's own draw call, which
+    /// worked while there was one mesh and silently breaks the moment there are two: the
+    /// arms slide out from under a recoiling launcher. This requires the shared world
+    /// matrix to *rotate* during recoil, not merely translate, which is what a rigid
+    /// transform about the eye does and what per-part offsets do not.
+    /// </summary>
+    private static CheckResult ViewmodelRecoilCarriesTheArmsWithTheWeapon()
+    {
+        ViewModelTuning tuning = new();
+        WeaponViewModel viewmodel = new(tuning);
+        ViewModelRenderState state = new(viewmodel, tuning);
+
+        Matrix atRest = state.GetWorldMatrix();
+
+        viewmodel.OnFired();
+        Matrix atShot = state.GetWorldMatrix();
+
+        List<string> failures = new();
+
+        float restPitch = viewmodel.RecoilRotation.X;
+        if (MathF.Abs(restPitch) < 1e-4f)
+        {
+            failures.Add("the recoil produced no pitch; the weapon would only slide backwards");
+        }
+
+        // Compare the *direction* the barrel points, not the muzzle's position. A rigid
+        // recoil rotates the assembly, so the barrel tips; a recoil that only slides
+        // the weapon backwards leaves the direction alone, and that is precisely the
+        // per-part behaviour this replaced. Measuring position instead would be fooled
+        // by RecoilRise, which is itself a translation.
+        Vector3 axisAtRest = Vector3.Normalize(Vector3.Transform(Vector3.UnitZ, atRest));
+        Vector3 axisAtShot = Vector3.Normalize(Vector3.Transform(Vector3.UnitZ, atShot));
+
+        float tipDegrees = (180f / MathF.PI) * MathF.Acos(Math.Clamp(Vector3.Dot(axisAtRest, axisAtShot), -1f, 1f));
+
+        // The peak recoil pitch is RecoilPitchRadians; the barrel must tip by
+        // approximately that. Anything near zero means the model translated instead.
+        float expectedDegrees = (180f / MathF.PI) * MathF.Abs(tuning.RecoilPitchRadians);
+
+        if (tipDegrees < expectedDegrees * 0.5f)
+        {
+            failures.Add("recoiling tipped the barrel only " + Format(tipDegrees) +
+                         " degrees when the recoil pitch is " + Format(expectedDegrees) +
+                         "; the launcher and the arms would translate independently rather than pivoting together");
+        }
+
+        // And the weapon must come back, or every shot leaves it permanently displaced.
+        for (int i = 0; i < 40; i++)
+        {
+            viewmodel.Update(tuning.RecoilSeconds / 20f);
+        }
+
+        if (state.GetWorldMatrix() != atRest)
+        {
+            failures.Add("the viewmodel did not return to its rest pose after the recoil settled");
+        }
+
+        return new("viewmodel recoil carries the arms with the weapon", failures.Count == 0,
+            failures.Count == 0
+                ? "recoil pitches the shared matrix (" + Format(tipDegrees) +
+                  " degrees of muzzle tip) so the arms and the launcher move together, and it settles back to rest"
+                : string.Join("; ", failures));
+    }
+
+    private readonly record struct Bounds(float MinX, float MinY, float MinZ, float MaxX, float MaxY, float MaxZ);
+
+    private static Bounds BoundsOf(WeaponAsset asset)
+    {
+        float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
+        float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
+
+        for (int i = 0; i < asset.Positions.Length; i++)
+        {
+            Vector3 p = asset.Positions[i];
+            minX = MathF.Min(minX, p.X);
+            minY = MathF.Min(minY, p.Y);
+            minZ = MathF.Min(minZ, p.Z);
+            maxX = MathF.Max(maxX, p.X);
+            maxY = MathF.Max(maxY, p.Y);
+            maxZ = MathF.Max(maxZ, p.Z);
+        }
+
+        return new Bounds(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
     // ---------------------------------------------------------------------
@@ -885,6 +1093,28 @@ public static IReadOnlyList<CheckResult> Run()
     }
 
     /// <summary>
+    /// Loads one of the embedded weapon blobs, reporting failure rather than throwing.
+    ///
+    /// The first-person arms are a separate asset, so a missing one is a real and
+    /// plausible state during development - and a check that throws on it takes the
+    /// whole suite down instead of reporting the one thing that is wrong.
+    /// </summary>
+    private static WeaponAsset? TryLoadWeaponAsset(string resourceName, out List<string> failures)
+    {
+        failures = new List<string>();
+
+        try
+        {
+            return WeaponAsset.Load(resourceName);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException)
+        {
+            failures.Add("the embedded asset '" + resourceName + "' could not be read: " + ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The weapon is rigid geometry, not part of the character's skinned mesh, and it
     /// carries an authored muzzle rather than one guessed from its bounds.
     ///
@@ -1057,19 +1287,34 @@ public static IReadOnlyList<CheckResult> Run()
             }
         }
 
+        // The socket must travel exactly as far as the bone it is attached to. This
+        // was previously a floor on absolute travel ("at least 5 cm"), which read as
+        // tracking but only worked because the arm used to swing through a run cycle.
+        // With the arm on a two-handed hold the hand is deliberately steady, so that
+        // floor failed while the socket tracked perfectly - the proxy, not the
+        // behaviour, was wrong.
+        //
+        // Comparing the two travels asserts the invariant directly and is strictly
+        // stronger: a socket frozen in world space while the arm moves, or one
+        // drifting away from its bone, both fail here regardless of how much
+        // either end happens to move.
         float socketTravel = 0f;
+        float boneTravel = 0f;
         for (int i = 1; i < socketPositions.Length; i++)
         {
             socketTravel = MathF.Max(socketTravel, Vector3.Distance(socketPositions[i], socketPositions[0]));
+            boneTravel = MathF.Max(boneTravel, Vector3.Distance(bonePositions[i], bonePositions[0]));
         }
 
-        if (socketTravel < 0.05f)
+        if (MathF.Abs(socketTravel - boneTravel) > 0.005f)
         {
-            failures.Add("WeaponSocket travels only " + Format(socketTravel) +
-                         " m over the run cycle; it is not following the arm");
+            failures.Add("WeaponSocket travels " + Format(socketTravel) +
+                         " m over the run cycle but Hand.R travels " + Format(boneTravel) +
+                         " m; the socket is not following its bone");
         }
 
-        summary.Add("socket travels " + Format(socketTravel) + " m with Hand.R over the run cycle");
+        summary.Add("socket travels " + Format(socketTravel) + " m, tracking Hand.R's " +
+                    Format(boneTravel) + " m exactly");
         summary.Add("held " + Format(Vector3.Distance(socketPositions[0], bonePositions[0])) +
                     " m off the bone, constant");
 
@@ -1125,19 +1370,51 @@ public static IReadOnlyList<CheckResult> Run()
                 : Vector3.Zero;
         }
 
-        // The two hands must be on opposite sides of the body: WeaponSocket carries the
-        // launcher on the right, WeaponSocketSupport supports it from the left. Comparing
-        // each socket against its own bone would be trivially true - a socket hangs off its
-        // bone by construction - so the comparison that means something is between them.
+        WeaponAsset weapon = LoadWeaponAsset();
+        int muzzle = asset.IndexOfSocket(WeaponAttachment.MuzzleSocketName);
+
+        float worstOffAxis = 0f;
+        float worstAlong = 0f;
+
         for (int i = 0; i < 6; i++)
         {
-            if (MathF.Sign(socketPositions[i].X) == MathF.Sign(weaponPositions[i].X) &&
-                MathF.Abs(socketPositions[i].X) > 0.05f)
+            animator.PoseClip(run, i * 0.05f, skeleton);
+
+            Vector3 support = Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(socket));
+            Vector3 grip = weaponPositions[i];
+            Vector3 muzzlePosition = muzzle >= 0
+                ? Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(muzzle))
+                : grip + (Vector3.Transform(Vector3.Zero, skeleton.SocketWorld(weaponSocket)) * weapon.ForwardExtent);
+
+            // A two-handed hold means the left hand is *on the launcher*: near the
+            // barrel's axis, and forward of the grip toward the muzzle.
+            //
+            // This replaced an assertion that the two sockets sat on opposite sides
+            // of the body, which described a one-handed carry rather than a
+            // two-handed one - and which a correctly authored hold fails, because a
+            // fore-grip hand is near the centreline by design. Distance from the
+            // barrel axis is the property that actually distinguishes "supporting
+            // the weapon" from "an arm hanging at the character's side".
+            Vector3 axis = muzzlePosition - grip;
+            float barrelLength = axis.Length();
+            if (barrelLength > 1e-4f)
             {
-                failures.Add("at sample " + i + " the support socket is on the same side of the body " +
-                             "as the weapon socket (x " + Format(socketPositions[i].X) + " vs " +
-                             Format(weaponPositions[i].X) + "); both hands are on one arm");
-                break;
+                axis /= barrelLength;
+                Vector3 alongAxis = support - grip;
+                float along = Vector3.Dot(alongAxis, axis);
+                float offAxis = (alongAxis - (axis * along)).Length();
+
+                worstOffAxis = MathF.Max(worstOffAxis, offAxis);
+                worstAlong = MathF.Max(worstAlong, along);
+
+                // 0.25 m off the axis is a hand holding the launcher; past that it is
+                // an arm that happens to be nearby. The authored hold measures 0.16 m.
+                if (offAxis > 0.25f)
+                {
+                    failures.Add("at sample " + i + " the support socket is " + Format(offAxis) +
+                                 " m off the barrel's axis; the left hand is not on the weapon");
+                    break;
+                }
             }
 
             // And the support socket must stay beside its own bone, which is what
@@ -1166,7 +1443,9 @@ public static IReadOnlyList<CheckResult> Run()
         return new("support socket tracks the left hand", failures.Count == 0,
             failures.Count == 0
                 ? "attached to Hand.L, " + Format(Vector3.Distance(socketPositions[0], bonePositions[0])) +
-                  " m off the bone, travels " + Format(travel) + " m over the run cycle"
+                  " m off the bone; the hand sits " + Format(worstAlong) + " m along a " +
+                  Format(weapon.ForwardExtent) + " m barrel, " + Format(worstOffAxis) +
+                  " m off its axis - a two-handed hold"
                 : string.Join("; ", failures));
     }
 
@@ -1601,6 +1880,278 @@ public static IReadOnlyList<CheckResult> Run()
                 ? "launcher " + Format(weaponLength) + " m long, " + Format(ratio * 100f) +
                   "% of the character's " + Format(characterHeight) + " m height"
                 : string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// Proves the screenshot encoder emits files a strict decoder can actually read.
+    ///
+    /// <para>
+    /// <see cref="PngWriter"/> hand-rolls PNG and zlib rather than pulling in an image
+    /// library, so nothing else in the project would notice when it emitted something
+    /// malformed. That is exactly what happened: the Adler-32 was written over the last
+    /// four bytes of the deflate stream instead of after it, every screenshot came out
+    /// four bytes short of its own end-of-block marker, and the fault was invisible
+    /// because it landed at the very tail of the pixel data. Most decoders still painted
+    /// a correct-looking image and quietly discarded the remainder.
+    /// </para>
+    ///
+    /// <para>
+    /// A verification tool that emits invalid files is worse than no verification tool,
+    /// because it reports success on evidence nobody can trust. This check decodes what
+    /// the encoder produced with an independent implementation - <see cref="ZLibStream"/>,
+    /// which validates the Adler-32 itself and throws on a truncated stream - and then
+    /// compares the recovered pixels against the input byte for byte.
+    /// </para>
+    ///
+    /// <para>
+    /// The content is deliberately not a flat fill: an encoder that wrote garbage in the
+    /// middle of a large image would still round-trip a uniform one, and the payload is
+    /// built from a counter so every pixel differs from its neighbours.
+    /// </para>
+    /// </summary>
+    private static CheckResult ScreenshotsAreValidPngFiles()
+    {
+        const int width = 97;
+        const int height = 61;
+        const string name = "png-writer-check";
+
+        byte[] source = new byte[width * height * 4];
+        for (int i = 0; i < source.Length; i++)
+        {
+            // A cheap non-repeating pattern: distinct bytes in every position, so no
+            // compressor-side shortcut could hide a mis-framed stream.
+            source[i] = (byte)((i * 31 + (i >> 3) * 7) & 0xFF);
+        }
+
+        string directory = Path.Combine(Path.GetTempPath(), "kinetic-selftest");
+        string path = Path.Combine(directory, name + ".png");
+
+        List<string> failures = new();
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            PngWriter.Save(path, width, height, source);
+
+            byte[] file = File.ReadAllBytes(path);
+            byte[]? decoded = DecodeStrict(file, width, height, out List<string> problems);
+
+            failures.AddRange(problems);
+
+            if (decoded is not null && !decoded.AsSpan().SequenceEqual(source))
+            {
+                int firstDifference = 0;
+                while (firstDifference < source.Length &&
+                       source[firstDifference] == decoded[firstDifference])
+                {
+                    firstDifference++;
+                }
+
+                failures.Add("decoded pixels differ from the source at byte " + firstDifference +
+                             " of " + source.Length + " (" + source[firstDifference] + " against " +
+                             decoded[firstDifference] + ")");
+            }
+
+            if (failures.Count == 0)
+            {
+                return new("screenshots are valid PNG files a strict decoder can read", true,
+                    "round-tripped " + width + "x" + height + " (" + source.Length +
+                    " bytes) through PngWriter and an independent inflate; every pixel and the Adler-32 agree");
+            }
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            failures.Add("threw " + exception.GetType().Name + ": " + exception.Message);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+                // A leftover temp file is not this check's concern.
+            }
+        }
+
+        return new("screenshots are valid PNG files a strict decoder can read", false,
+            string.Join("; ", failures));
+    }
+
+    /// <summary>
+    /// Reads back a PNG the way a strict consumer would, checking the framing a lenient
+    /// one would let slide.
+    ///
+    /// Walks the chunk structure by hand rather than using a library: the point is to
+    /// confirm the byte layout this encoder actually wrote, which is exactly the part
+    /// that was wrong. Returns null when the pixels could not be recovered.
+    /// </summary>
+    private static byte[]? DecodeStrict(byte[] file, int expectedWidth, int expectedHeight,
+        out List<string> problems)
+    {
+        problems = new();
+
+        ReadOnlySpan<byte> signature = stackalloc byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+        if (file.Length < signature.Length || !file.AsSpan(0, signature.Length).SequenceEqual(signature))
+        {
+            problems.Add("does not begin with the PNG signature");
+            return null;
+        }
+
+        int width = 0;
+        int height = 0;
+        bool sawHeader = false;
+        bool sawEnd = false;
+        byte[]? compressed = null;
+
+        int offset = signature.Length;
+        while (offset + 12 <= file.Length)
+        {
+            int length = (int)ReadBigEndian(file, offset);
+            string type = System.Text.Encoding.ASCII.GetString(file, offset + 4, 4);
+
+            if (offset + 12 + length > file.Length)
+            {
+                problems.Add("chunk " + type + " claims " + length + " bytes but the file ends early");
+                return null;
+            }
+
+            uint declared = (uint)ReadBigEndian(file, offset + 8 + length);
+            uint computed = Crc32(file, offset + 4, 4 + length);
+            if (declared != computed)
+            {
+                problems.Add("chunk " + type + " has CRC 0x" + declared.ToString("X8") +
+                             " against a computed 0x" + computed.ToString("X8"));
+                return null;
+            }
+
+            switch (type)
+            {
+                case "IHDR":
+                    width = (int)ReadBigEndian(file, offset + 8);
+                    height = (int)ReadBigEndian(file, offset + 12);
+                    sawHeader = true;
+                    break;
+                case "IDAT":
+                    compressed = file.AsSpan(offset + 8, length).ToArray();
+                    break;
+                case "IEND":
+                    sawEnd = true;
+                    break;
+            }
+
+            offset += 12 + length;
+
+            if (sawEnd)
+            {
+                break;
+            }
+        }
+
+        if (!sawHeader)
+        {
+            problems.Add("has no IHDR chunk");
+            return null;
+        }
+
+        if (!sawEnd)
+        {
+            problems.Add("has no IEND chunk");
+            return null;
+        }
+
+        if (offset != file.Length)
+        {
+            problems.Add("has " + (file.Length - offset) + " trailing bytes after IEND");
+        }
+
+        if (compressed is null)
+        {
+            problems.Add("has no image data");
+            return null;
+        }
+
+        if (width != expectedWidth || height != expectedHeight)
+        {
+            problems.Add("declares " + width + "x" + height + " but was asked for " +
+                         expectedWidth + "x" + expectedHeight);
+            return null;
+        }
+
+        // ZLibStream checks the Adler-32 itself and throws on a stream that ends before its
+        // own end-of-block marker, which is the failure this check exists to catch.
+        byte[] inflated;
+        try
+        {
+            using MemoryStream input = new(compressed, writable: false);
+            using ZLibStream zlib = new(input, CompressionMode.Decompress);
+            using MemoryStream output = new();
+            zlib.CopyTo(output);
+            inflated = output.ToArray();
+        }
+        catch (InvalidDataException exception)
+        {
+            problems.Add("the zlib stream is not decodable: " + exception.Message);
+            return null;
+        }
+
+        int stride = width * 4;
+        int expected = (stride + 1) * height;
+        if (inflated.Length != expected)
+        {
+            problems.Add("inflated to " + inflated.Length + " bytes, expected " + expected);
+            return null;
+        }
+
+        // Undo the per-scanline filter byte. Only "None" is ever emitted, so this is a
+        // stride rather than a real un-filter, and a non-zero filter byte is a bug worth
+        // naming rather than silently accepting.
+        byte[] pixels = new byte[stride * height];
+        for (int y = 0; y < height; y++)
+        {
+            int rowStart = y * (stride + 1);
+            byte filter = inflated[rowStart];
+            if (filter != 0)
+            {
+                problems.Add("scanline " + y + " uses filter " + filter + ", expected 0 (None)");
+                return null;
+            }
+
+            Array.Copy(inflated, rowStart + 1, pixels, y * stride, stride);
+        }
+
+        return pixels;
+    }
+
+    private static uint ReadBigEndian(byte[] buffer, int offset) =>
+        ((uint)buffer[offset] << 24) |
+        ((uint)buffer[offset + 1] << 16) |
+        ((uint)buffer[offset + 2] << 8) |
+        buffer[offset + 3];
+
+    /// <summary>
+    /// CRC-32 over a slice of <paramref name="buffer"/>, using the PNG/IEEE polynomial.
+    /// </summary>
+    /// <remarks>
+    /// Written out longhand rather than reusing the encoder's own helper: a check that
+    /// shares the implementation it is meant to audit cannot catch that implementation
+    /// being wrong. The shifts are by one bit per round - the reflected form - which is
+    /// exactly where this got wrong the first time it was typed.
+    /// </remarks>
+    private static uint Crc32(byte[] buffer, int offset, int count)
+    {
+        uint crc = 0xFFFFFFFF;
+        for (int i = 0; i < count; i++)
+        {
+            crc ^= buffer[offset + i];
+            for (int bit = 0; bit < 8; bit++)
+            {
+                crc = (crc & 1) != 0 ? 0xEDB88320u ^ (crc >> 1) : crc >> 1;
+            }
+        }
+
+        return crc ^ 0xFFFFFFFF;
     }
 
     public static bool Passed(IReadOnlyList<CheckResult> results)

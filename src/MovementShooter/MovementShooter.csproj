@@ -35,6 +35,12 @@
          animation, attached at runtime through the character's socket system. -->
     <EmbeddedResource Include="Assets\Models\KINETIC_RocketLauncher.bin"
                       LogicalName="KINETIC_RocketLauncher.bin" />
+    <!-- The first-person arms. Authored in the launcher's own space - grip at the origin,
+         barrel along +Z - so the launcher and the arms are drawn with a single transform.
+         A separate asset because the launcher is shared with the third-person character,
+         and viewmodel geometry must not appear on a remote character. -->
+    <EmbeddedResource Include="Assets\Models\KINETIC_FPSArms.bin"
+                      LogicalName="KINETIC_FPSArms.bin" />
   </ItemGroup>
 
 </Project>

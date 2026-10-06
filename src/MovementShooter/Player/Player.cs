@@ -15,7 +15,7 @@ public sealed class Player : IDisposable
     private readonly PhysicsWorld _physics;
     private bool _disposed;
 
-    public Player(PhysicsWorld physics, PlayerTuning tuning, CursorLock? cursorLock)
+public Player(PhysicsWorld physics, PlayerTuning tuning, CursorLock? cursorLock)
     {
         _physics = physics ?? throw new ArgumentNullException(nameof(physics));
         Tuning = tuning ?? throw new ArgumentNullException(nameof(tuning));
@@ -23,8 +23,8 @@ public sealed class Player : IDisposable
 
         Body = physics.AddDynamicCapsule(tuning.CapsuleRadius, tuning.CapsuleSegmentLength, tuning.SpawnPosition, tuning.Mass);
         Health = new Combat.Health(tuning.MaxHealth);
-        Movement = new PlayerMovement(physics, Body, tuning);
         Camera = new PlayerCamera(tuning);
+        Movement = new PlayerMovement(physics, Body, tuning, Camera);
 
         Camera.Follow(Movement.Position);
     }

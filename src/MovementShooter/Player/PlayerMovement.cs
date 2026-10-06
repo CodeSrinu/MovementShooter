@@ -76,17 +76,23 @@ public sealed class PlayerMovement
     private float _slideElapsed;
     private float _slideCooldownRemaining;
 
-    /// <summary>The direction the slide was launched in, and the axis steering is measured against.</summary>
+    /// <summary>The camera reference for third-person wish direction calculation.</summary>
+    private PlayerCamera? _camera;
+
+    /// <summary>
+    /// The direction the slide was launched in, and the axis steering is measured against.
+    /// </summary>
     private Vector2 _slideDirection;
 
     /// <summary>The player's current stance height, so probes and the camera agree with the collider.</summary>
     private float _currentHeight;
 
-    public PlayerMovement(PhysicsWorld physics, PhysicsBody body, PlayerTuning tuning)
+    public PlayerMovement(PhysicsWorld physics, PhysicsBody body, PlayerTuning tuning, PlayerCamera? camera = null)
     {
         _physics = physics ?? throw new ArgumentNullException(nameof(physics));
         _body = body ?? throw new ArgumentNullException(nameof(body));
         _tuning = tuning ?? throw new ArgumentNullException(nameof(tuning));
+        _camera = camera;
 
         _isGrounded = ProbeWalkableDistanceBelowFeet(out _) <= _tuning.GroundProbeDistance;
         _currentHeight = _tuning.CapsuleHeight;
@@ -738,7 +744,25 @@ public sealed class PlayerMovement
     /// <summary>The player's current stance height in metres, for the camera and the debug readout.</summary>
     public float CurrentHeight => _currentHeight;
 
-    /// <summary>
+/// <summary>
+/// Gets the wish direction from the camera. Used by the controller in third-person mode.
+/// </summary>
+public Vector3 GetWishDirection(Vector2 move)
+{
+    if (move.LengthSquared() <= 0f)
+    {
+        return Vector3.Zero;
+    }
+    
+    // Use the camera's flat forward/right to convert move input to world direction
+    Vector3 flatForward = _camera?.FlatForward ?? Vector3.Forward;
+    Vector3 flatRight = _camera?.Right ?? Vector3.Right;
+    
+    Vector3 direction = (flatForward * move.Y) + (flatRight * move.X);
+    return direction.LengthSquared() > 0f ? Vector3.Normalize(direction) : Vector3.Zero;
+}
+
+/// <summary>
     /// Sets where a dash with no movement input goes. Supplied by the camera each frame, so the camera basis
     /// stays in the camera and this class never has to know what a yaw is.
     /// </summary>
@@ -748,6 +772,14 @@ public sealed class PlayerMovement
         _fallbackDashDirection = cameraForward.LengthSquared() > 0.0001f
             ? Vector3.Normalize(cameraForward)
             : Vector3.Forward;
+    }
+
+    /// <summary>
+    /// Sets the camera reference for third-person wish direction calculation.
+    /// </summary>
+    internal void SetCamera(PlayerCamera camera)
+    {
+        _camera = camera;
     }
 
     private Vector3 ApplyGroundMovement(Vector3 horizontal, Vector3 wishDirection, float deltaSeconds)

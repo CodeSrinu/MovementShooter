@@ -17,11 +17,13 @@ public sealed class PlayerController : IDisposable
     private readonly Player _player;
     private readonly PlayerInput _input = new();
     private readonly Func<PlayerInputState>? _inputOverride;
+    private readonly CameraManager _cameraManager;
     private bool _disposed;
 
-    private PlayerController(Player player, Func<PlayerInputState>? inputOverride = null)
+    private PlayerController(Player player, CameraManager cameraManager, Func<PlayerInputState>? inputOverride = null)
     {
         _player = player;
+        _cameraManager = cameraManager;
         _inputOverride = inputOverride;
     }
 
@@ -37,7 +39,8 @@ public sealed class PlayerController : IDisposable
         CursorLock cursorLock)
     {
         ArgumentNullException.ThrowIfNull(cursorLock);
-        return new PlayerController(new Player(physics, tuning, cursorLock));
+        CameraManager cameraManager = new CameraManager(tuning);
+        return new PlayerController(new Player(physics, tuning, cursorLock), cameraManager);
     }
 
     /// <summary>
@@ -49,7 +52,7 @@ public sealed class PlayerController : IDisposable
         Physics.PhysicsWorld physics,
         PlayerTuning tuning,
         Func<PlayerInputState>? inputOverride = null) =>
-        new(new Player(physics, tuning, cursorLock: null), inputOverride);
+        new(new Player(physics, tuning, cursorLock: null), new CameraManager(tuning), inputOverride);
 
     /// <summary>Reads input and advances the player by one frame.</summary>
     public void Update(float frameDeltaSeconds)
@@ -67,12 +70,23 @@ public sealed class PlayerController : IDisposable
             cursorLock?.Toggle();
         }
 
-        if (cursorLock?.IsLocked == true)
+        // Handle camera mode switching with F3
+        if (state.CameraModeToggleRequested)
         {
-            _player.ApplyLook(cursorLock.ConsumeLookDelta());
+            _cameraManager.ToggleMode();
         }
 
-        Vector3 wish = _player.Camera.GetWishDirection(state.Move);
+        if (_cameraManager.CurrentMode == CameraMode.FirstPerson)
+        {
+            if (cursorLock?.IsLocked == true)
+            {
+                _player.ApplyLook(cursorLock.ConsumeLookDelta());
+            }
+        }
+
+        Vector3 wish = _cameraManager.CurrentMode == CameraMode.FirstPerson
+            ? _player.Camera.GetWishDirection(state.Move)
+            : _player.Movement.GetWishDirection(state.Move); // third-person uses movement direction
 
         // With no movement input a dash goes where the player is looking. Passing it in keeps the camera basis
         // in the camera, rather than teaching the movement code what a yaw is.

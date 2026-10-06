@@ -7,15 +7,21 @@ using MovementShooter.Map;
 namespace MovementShooter.Character;
 
 /// <summary>
-/// GPU residency and draw for one rigid weapon.
-///
-/// The weapon is rigid, so its vertex buffer is uploaded once at construction and never
-/// touched again - the opposite of <see cref="CharacterRenderer"/>, which rewrites its
-/// buffer every frame. It reuses the same <see cref="VertexPositionColorNormal"/> format
-/// and <see cref="SurfaceMaterial"/> as everything else, so it needs no vertex
-/// declaration, no shader and no texture, and it lights exactly like the arena and the
-/// character do.
-/// </summary>
+    /// GPU residency and draw for one rigid weapon.
+    ///
+    /// The weapon is rigid, so its vertex buffer is uploaded once at construction and never
+    /// touched again - the opposite of <see cref="CharacterRenderer"/>, which rewrites its
+    /// buffer every frame. It reuses the same <see cref="VertexPositionColorNormal"/> format
+    /// and <see cref="SurfaceMaterial"/> as everything else, so it needs no vertex
+    /// declaration, no shader and no texture, and it lights exactly like the arena and the
+    /// character do.
+    ///
+    /// <para>
+    /// Shared by both viewpoints. The first-person viewmodel draws through this class too, which
+    /// is what makes the same asset read as the same weapon when it moves from a character's hand
+    /// to the player's own.
+    /// </para>
+    /// </summary>
 public sealed class WeaponRenderer : IDisposable
 {
     private readonly WeaponAsset _asset;
@@ -72,6 +78,9 @@ public sealed class WeaponRenderer : IDisposable
 
     /// <summary>Number of draw calls per frame, one per material.</summary>
     public int SubmeshCount => _asset.Submeshes.Length;
+
+    /// <summary>The mesh this renderer draws, for diagnostics and checks.</summary>
+    public WeaponAsset Asset => _asset;
 
     /// <summary>
     /// Draws the weapon at <paramref name="world"/>.

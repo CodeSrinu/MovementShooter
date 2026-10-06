@@ -139,6 +139,11 @@ public sealed class CharacterBody : IDisposable
         Vector3 feet = bodyPosition;
         feet.Y -= stanceHeight * 0.5f;
 
+        // The character model's origin may not be at the feet. The asset's MinY is the
+        // lowest Y in model space (soles of the feet). We need to offset the translation
+        // so that the model's MinY ends up at the feet position after scaling.
+        feet.Y -= _asset.MinY * _tuning.Scale;
+
         return Matrix.CreateScale(_tuning.Scale)
             * Matrix.CreateTranslation(feet)
             * Matrix.CreateRotationY(yawRadians);

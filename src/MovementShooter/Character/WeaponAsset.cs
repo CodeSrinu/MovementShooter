@@ -28,6 +28,20 @@ public sealed class WeaponAsset
     /// <summary>Manifest name of the embedded blob. Set explicitly in the csproj.</summary>
     public const string ResourceName = "KINETIC_RocketLauncher.bin";
 
+    /// <summary>
+    /// Manifest name of the first-person arms blob.
+    ///
+    /// A separate asset rather than part of the launcher because the launcher is
+    /// shared: the same geometry is carried by the third-person character through
+    /// <see cref="WeaponSocket"/> and drawn here for the local player's own view.
+    /// The arms exist only in first person, so folding them into the launcher
+    /// would put viewmodel geometry on every remote character.
+    ///
+    /// Both are authored in the same space - grip at the origin, barrel along +Z -
+    /// so the two can be drawn with one transform and recoil moves them together.
+    /// </summary>
+    public const string ArmsResourceName = "KINETIC_FPSArms.bin";
+
     private const string Magic = "KINWEAP1";
     private const int FormatVersion = 1;
 
@@ -99,6 +113,17 @@ public sealed class WeaponAsset
 
     /// <summary>Loads the embedded weapon blob.</summary>
     public static WeaponAsset Load() => Load(ReadEmbedded(ResourceName));
+
+    /// <summary>
+    /// Loads one of the embedded weapon blobs by manifest name.
+    ///
+    /// Both the launcher and the first-person arms are rigid meshes in the same
+    /// authored space, so they share this format and this loader. Naming the
+    /// resource explicitly is what stops the two from being confused for one
+    /// another - they are different meshes and only one of them is carried by the
+    /// character.
+    /// </summary>
+    public static WeaponAsset Load(string resourceName) => Load(ReadEmbedded(resourceName));
 
     /// <summary>Loads a weapon blob from a stream, so the headless checks can build one from bytes.</summary>
     public static WeaponAsset Load(Stream stream)

@@ -124,29 +124,39 @@ public sealed class ViewModelTuning
 {
     /// <summary>
     /// Where the model sits relative to the eye, in metres: to the right, down, and forward.
-    ///
-    /// Tuned by eye against the viewmodel's 62 degree field of view. What matters is that the launcher occupies
-    /// the lower right of the screen and leaves the centre clear, because the centre is where the player aims.
-    /// Anything reaching the middle reads as scenery rather than as something being held.
     /// </summary>
-    public Vector3 RestOffset { get; set; } = new(0.30f, -0.25f, 0.42f);
+    /// <remarks>
+    /// The launcher is 0.80 m long and is drawn at <see cref="ModelScale"/>, so the number that
+    /// actually decides whether the viewmodel works is how big it looks at
+    /// <see cref="ViewModelFieldOfViewDegrees"/>. Held at half a metre under a 62 degree
+    /// projection it fills more than the whole screen; at this distance it reads as a launcher
+    /// carried in front of the player, and leaves the centre of the screen - which is where the
+    /// player aims - clear. Anything reaching the middle reads as scenery rather than as
+    /// something being held.
+    /// </remarks>
+    public Vector3 RestOffset { get; set; } = new(0.40f, -0.26f, 0.85f);
 
     /// <summary>
-    /// Uniform scale for the whole model. One value so the proportions can be adjusted together instead of by
-    /// hand-editing seven part sizes: the parts are laid out in metres, and this decides how large the launcher
-    /// actually reads on screen.
+    /// Uniform scale for the whole viewmodel - launcher and arms together, so the arms cannot
+    /// slide out from under the weapon.
     /// </summary>
-    public float ModelScale { get; set; } = 0.85f;
+    /// <remarks>
+    /// One value rather than a per-part scale: the arms are authored against the launcher in the
+    /// launcher's own space, and that relationship is the thing worth preserving. Scaling each
+    /// part separately would let them drift apart with every tuning change.
+    /// </remarks>
+    public float ModelScale { get; set; } = 0.62f;
 
     /// <summary>
     /// Rest tilt of the model in view space, in radians: X pitches the muzzle up slightly, Y brings the muzzle
     /// towards the centre of the screen, Z rolls it.
     ///
     /// Applied <i>after</i> the recoil and inside the view basis, so it is a fixed offset between the model and
-    /// the aim direction rather than something that compounds as the player turns. A launcher held off to the right
-    /// reads as aimed slightly inward, which is what stops it looking like it is pointing somewhere else entirely.
+    /// the aim direction rather than something that compounds as the player turns. The inward yaw is deliberately
+    /// small: the launcher sits to the right of the screen, so a large one aims it across the middle of the
+    /// view and the barrel visibly points somewhere other than where the player is aiming.
     /// </summary>
-    public Vector3 RestRotation { get; set; } = new(0.04f, -0.17f, 0.03f);
+    public Vector3 RestRotation { get; set; } = new(0.04f, -0.09f, 0.03f);
 
     /// <summary>
     /// Field of view for the viewmodel, in degrees. Narrower than the world's 90 on purpose: at that field of view
@@ -210,13 +220,35 @@ public sealed class ViewModelRenderState
     public Matrix Projection { get; set; } = Matrix.Identity;
 
     /// <summary>
-    /// Places the model in view space: the camera basis, with the hold position and the current recoil applied as a
-    /// translation, and the whole model scaled.
-    ///
-    /// Only a position, no rotation. The facing comes entirely from the camera's view matrix; baking a yaw into
-    /// the model as well would double it up and the launcher would swing wider than the aim as the player turns.
+    /// Places the model in view space: the camera basis, with the hold position, the recoil and the
+    /// rest tilt applied.
     /// </summary>
-    public Matrix GetWorldMatrix() =>
-        Matrix.CreateScale(Tuning.ModelScale)
-        * Matrix.CreateTranslation(Tuning.RestOffset + Viewmodel.RecoilOffset);
+    /// <remarks>
+    /// The recoil *rotation* lives here rather than in the renderer, and that matters now the viewmodel
+    /// is several meshes. Each part previously applied its own recoil inside its own draw call; with the
+    /// launcher and a pair of arms sharing one matrix, the recoil pivots the whole assembly about the eye
+    /// exactly as a real weapon does. Anything else lets the arms slide out from under a recoiling
+    /// launcher.
+    ///
+    /// Order is scale, then translation, then rotation, so the model scales about the eye rather than
+    /// about the hold position, and the rest tilt is applied outside the translation - making it a
+    /// fixed angle between the model and the aim rather than something that compounds as the player turns.
+    /// </remarks>
+    public Matrix GetWorldMatrix()
+    {
+        Matrix recoil = Matrix.CreateFromYawPitchRoll(
+            Viewmodel.RecoilRotation.Y,
+            Viewmodel.RecoilRotation.X,
+            Viewmodel.RecoilRotation.Z);
+
+        Matrix rest = Matrix.CreateFromYawPitchRoll(
+            Tuning.RestRotation.Y,
+            Tuning.RestRotation.X,
+            Tuning.RestRotation.Z);
+
+        return Matrix.CreateScale(Tuning.ModelScale)
+            * Matrix.CreateTranslation(Tuning.RestOffset + Viewmodel.RecoilOffset)
+            * recoil
+            * rest;
+    }
 }

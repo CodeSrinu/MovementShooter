@@ -140,9 +140,6 @@ IsMouseVisible = true;
         // The first-person launcher. Presentation only: it reads the camera's basis and the weapon's recoil state,
         // and writes neither back. Nothing here can affect movement.
         ViewModelTuning viewTuning = _config.WeaponViewModel;
-        _viewmodel = new WeaponViewModel(viewTuning);
-        _weaponView = new ViewModelRenderState(_viewmodel, viewTuning);
-        _viewmodelRenderer = new FirstPersonWeaponRenderer(GraphicsDevice, _viewmodel, viewTuning);
 
         // A row of dummies south of the spawn, so knockback and falloff can be compared side by side by walking
         // along the line. Not enemies: no behaviour, only health and a body to throw.
@@ -168,11 +165,24 @@ IsMouseVisible = true;
         // its transform from the character's WeaponSocket every frame, so it follows the
         // animation without any per-clip weapon pose, and a second character would carry
         // its own by handing this a different body.
-        _weapon = new WeaponAttachment(GraphicsDevice, WeaponAsset.Load());
+        WeaponAsset launcherAsset = WeaponAsset.Load();
+        _weapon = new WeaponAttachment(GraphicsDevice, launcherAsset);
         _weapon.Attach(_character);
         Log.Info($"Weapon loaded: {_weapon.Asset.VertexCount} verts, {_weapon.Asset.TriangleCount} tris, " +
                  $"{_weapon.Asset.Submeshes.Length} materials, authored muzzle at z " +
                  $"{_weapon.Asset.Muzzle.Z:0.000} m. Attached to {WeaponAttachment.WeaponSocketName}.");
+
+        // The first-person viewmodel: the *same* launcher asset, plus arms that exist only in
+        // first person. One weapon, two viewpoints - the local player sees the authored
+        // launcher in their own hands rather than a second, procedural one.
+        WeaponAsset armsAsset = WeaponAsset.Load(WeaponAsset.ArmsResourceName);
+        _viewmodel = new WeaponViewModel(viewTuning);
+        _weaponView = new ViewModelRenderState(_viewmodel, viewTuning);
+        _viewmodelRenderer = new FirstPersonWeaponRenderer(
+            GraphicsDevice, _viewmodel, viewTuning, launcherAsset, armsAsset);
+        Log.Info($"Viewmodel: canonical launcher {_viewmodelRenderer.Launcher.Name} plus " +
+                 $"{armsAsset.Name} ({armsAsset.VertexCount} verts), shared muzzle at z " +
+                 $"{_viewmodelRenderer.Muzzle.Z:0.000} m.");
 
         if (_config.RunCharacterPreview)
         {

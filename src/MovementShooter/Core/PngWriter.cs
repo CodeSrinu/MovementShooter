@@ -69,6 +69,21 @@ public static class PngWriter
         return result;
     }
 
+    /// <summary>
+    /// Wraps raw bytes in a zlib stream: a 2-byte header, the deflate data, then a 4-byte
+    /// Adler-32 of the *uncompressed* input.
+    /// </summary>
+    /// <remarks>
+    /// The checksum is <b>appended after</b> the deflate data, and the result is built in a
+    /// fresh array sized from <see cref="MemoryStream.Length"/>. It used to be written into
+    /// <see cref="MemoryStream.GetBuffer"/> at <c>Length - 4</c>, which lands inside the
+    /// compressed data: the last four bytes of the deflate stream were overwritten by the
+    /// checksum, so the stored stream was four bytes short of its own end-of-block marker.
+    /// Every PNG this wrote was corrupt. It survived because the damage falls at the very
+    /// end of the pixel data, so most decoders reconstructed a correct-looking image and
+    /// discarded the remainder - which is worse than failing loudly, because a screenshot
+    /// tool that quietly emits invalid files cannot be trusted to verify anything.
+    /// </remarks>
     private static byte[] ZlibCompress(byte[] raw)
     {
         using MemoryStream buffer = new();
@@ -80,12 +95,13 @@ public static class PngWriter
             deflate.Write(raw, 0, raw.Length);
         }
 
-        byte[] data = buffer.GetBuffer();
-        WriteBigEndian(data, (int)buffer.Length - 4, Adler32(raw));
+        int deflateLength = (int)buffer.Length;
+        byte[] result = new byte[deflateLength + 4];
 
-        byte[] result = new byte[buffer.Length];
         buffer.Position = 0;
-        buffer.ReadExactly(result, 0, result.Length);
+        buffer.ReadExactly(result, 0, deflateLength);
+        WriteBigEndian(result, deflateLength, Adler32(raw));
+
         return result;
     }
 
